@@ -1,0 +1,37 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ledgerline:latest
+    ports:
+      - "8000:8000"
+    environment:
+      # Compose refuses to start without a secret rather than inventing one.
+      LEDGERLINE_JWT_SECRET: ${LEDGERLINE_JWT_SECRET:?set LEDGERLINE_JWT_SECRET in .env (32+ chars)}
+      LEDGERLINE_ENV: ${LEDGERLINE_ENV:-prod}
+      LEDGERLINE_DATABASE_PATH: /data/ledgerline.db
+      LEDGERLINE_STATIC_DIR: /app/frontend/dist
+      LEDGERLINE_DEMO_SEED: ${LEDGERLINE_DEMO_SEED:-1}
+      LEDGERLINE_CORS_ORIGINS: ${LEDGERLINE_CORS_ORIGINS:-}
+      LEDGERLINE_TRUSTED_HOSTS: ${LEDGERLINE_TRUSTED_HOSTS:-}
+    volumes:
+      - ledgerline-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).status == 200 else 1)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  ledgerline-data:

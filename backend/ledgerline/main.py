@@ -1,0 +1,265 @@
+"""FastAPI application factory.
+
+Middleware order matters and is deliberate:
+
+    ServerErrorMiddleware
+      -> request context (request id, ip, user agent, body size)
+        -> security headers
+          -> CORS
+            -> routes / exception handlers
+
+Every response carries ``X-Request-ID``; every ``/api`` response is
+``Cache-Control: no-store`` so tokens and balances never sit in a shared proxy
+cache.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+import sqlite3
+import sys
+import traceback
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any, AsyncIterator
+
+from fastapi import FastAPI, Request, Response
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.staticfiles import StaticFiles
+
+from . import __version__
+from . import ctx as request_ctx
+from .config import Settings
+from .db import Database
+from .errors import AppError
+from .limiter import SlidingWindowLimiter
+from .routers import accounts, admin, audit_views, auth, meta, transfers
+from .seed import bootstrap, seed_demo
+
+MAX_BODY_BYTES = 64 * 1024
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+
+logger = logging.getLogger("ledgerline")
+
+
+def _request_id(request: Request) -> str:
+    return getattr(request.state, "request_id", None) or request_ctx.get_context().request_id
+
+
+def _error_payload(code: str, message: str, request_id: str, details: dict[str, Any] | None = None) -> dict:
+    return {
+        "error": {
+            "code": code,
+            "message": message,
+            "details": details or {},
+            "request_id": request_id,
+        }
+    }
+
+
+def create_app(settings: Settings | None = None) -> FastAPI:
+    settings = settings or Settings.from_env()
+    db = Database(settings.database_path, settings.sqlite_busy_timeout_ms)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        db.initialize()
+        bootstrap(db)
+        if settings.demo_seed_enabled:
+            seed_demo(db, settings)
+        print(
+            f"[ledgerline] v{__version__} ready env={settings.env} db={settings.database_path}",
+            file=sys.stderr,
+        )
+        yield
+
+    app = FastAPI(
+        title="LedgerLine API",
+        version=__version__,
+        description=(
+            "Money movement with a double-entry ledger, at-most-once transfers "
+            "(Idempotency-Key), concurrency-safe balances and an append-only, "
+            "hash-chained audit trail."
+        ),
+        lifespan=lifespan,
+    )
+    app.state.settings = settings
+    app.state.db = db
+    app.state.money_limiter = SlidingWindowLimiter(settings.money_writes_per_minute, 60)
+    app.state.login_limiter = SlidingWindowLimiter(100, 60)
+
+    # --- middleware -------------------------------------------------------
+
+    @app.middleware("http")
+    async def request_context_middleware(request: Request, call_next):  # type: ignore[no-untyped-def]
+        incoming = request.headers.get("x-request-id")
+        request_id = incoming if incoming and _REQUEST_ID_RE.match(incoming) else request_ctx.new_request_id()
+        client = request.client.host if request.client else None
+        if settings.trusted_hosts and request.headers.get("x-forwarded-for"):
+            client = request.headers["x-forwarded-for"].split(",")[0].strip()
+        request.state.request_id = request_id
+        request_ctx.set_context(
+            request_ctx.RequestContext(
+                request_id=request_id,
+                ip=client,
+                user_agent=(request.headers.get("user-agent") or "")[:200] or None,
+            )
+        )
+        try:
+            length = request.headers.get("content-length")
+            if length is not None and length.isdigit() and int(length) > MAX_BODY_BYTES:
+                response: Response = JSONResponse(
+                    status_code=413,
+                    content=_error_payload(
+                        "PAYLOAD_TOO_LARGE",
+                        f"Request body must be at most {MAX_BODY_BYTES} bytes.",
+                        request_id,
+                    ),
+                )
+            else:
+                response = await call_next(request)
+        finally:
+            request_ctx.clear_context()
+
+        response.headers["X-Request-ID"] = request_id
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Permissions-Policy"] = "geolocation=(), camera=(), microphone=()"
+        response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'; "
+            "frame-ancestors *"
+        )
+        if request.url.path.startswith("/api"):
+            response.headers["Cache-Control"] = "no-store"
+        if settings.is_prod:
+            response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
+        return response
+
+    if settings.cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=list(settings.cors_origins),
+            allow_credentials=False,  # bearer tokens only, no cookie-based auth
+            allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            allow_headers=["Authorization", "Content-Type", "Idempotency-Key", "X-Request-ID"],
+            expose_headers=["X-Request-ID", "Idempotent-Replay", "Location"],
+            max_age=600,
+        )
+
+    if settings.trusted_hosts:
+        from starlette.middleware.trustedhost import TrustedHostMiddleware
+
+        app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(settings.trusted_hosts))
+
+    # --- exception handlers ----------------------------------------------
+
+    @app.exception_handler(AppError)
+    async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
+        headers = {}
+        if exc.status_code == 401:
+            headers["WWW-Authenticate"] = "Bearer"
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=_error_payload(exc.code, exc.message, _request_id(request), exc.details),
+            headers=headers,
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+        # Field locations and messages only: never echo the submitted value back
+        # (it may be a password) and never expose internals.
+        errors = [
+            {
+                "field": ".".join(str(part) for part in error.get("loc", ()) if part != "body"),
+                "message": error.get("msg", "invalid value"),
+                "type": error.get("type", "invalid"),
+            }
+            for error in exc.errors()
+        ]
+        return JSONResponse(
+            status_code=422,
+            content=_error_payload(
+                "VALIDATION_ERROR",
+                "The request body is invalid.",
+                _request_id(request),
+                {"errors": errors},
+            ),
+        )
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_error_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+        code = {404: "NOT_FOUND", 405: "METHOD_NOT_ALLOWED", 413: "PAYLOAD_TOO_LARGE"}.get(
+            exc.status_code, "HTTP_ERROR"
+        )
+        message = {404: "Resource not found.", 405: "Method not allowed."}.get(
+            exc.status_code, str(exc.detail)
+        )
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=_error_payload(code, message, _request_id(request)),
+        )
+
+    @app.exception_handler(sqlite3.OperationalError)
+    async def sqlite_error_handler(request: Request, exc: sqlite3.OperationalError) -> JSONResponse:
+        logger.error("sqlite operational error: %s", exc)
+        return JSONResponse(
+            status_code=503,
+            content=_error_payload(
+                "SERVICE_BUSY",
+                "The ledger is busy; retry the request.",
+                _request_id(request),
+            ),
+            headers={"Retry-After": "1"},
+        )
+
+    @app.exception_handler(Exception)
+    async def unhandled_handler(request: Request, exc: Exception) -> JSONResponse:
+        request_id = _request_id(request)
+        logger.error("unhandled error [%s]: %s", request_id, traceback.format_exc())
+        return JSONResponse(
+            status_code=500,
+            content=_error_payload(
+                "INTERNAL_ERROR",
+                "An unexpected error occurred. Quote the request id when reporting it.",
+                request_id,
+            ),
+        )
+
+    # --- routes -----------------------------------------------------------
+
+    app.include_router(meta.router)
+    app.include_router(auth.router)
+    app.include_router(accounts.router)
+    app.include_router(transfers.router)
+    app.include_router(admin.router)
+    app.include_router(audit_views.router)
+
+    static_dir = Path(settings.static_dir) if settings.static_dir else None
+    if static_dir and static_dir.is_dir():
+        app.mount("/", SPAStaticFiles(directory=str(static_dir), html=True), name="spa")
+
+    return app
+
+
+class SPAStaticFiles(StaticFiles):
+    """Serve the built SPA, falling back to index.html for client-side routes."""
+
+    async def get_response(self, path: str, scope):  # type: ignore[no-untyped-def]
+        try:
+            response = await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            if exc.status_code == 404:
+                return await super().get_response("index.html", scope)
+            raise
+        if response.status_code == 404:
+            return await super().get_response("index.html", scope)
+        return response
+
+
+app = create_app()
