@@ -1,0 +1,5 @@
+# Runtime dependencies (pinned; see docs/DEPLOYMENT.md)
+fastapi==0.162.1
+uvicorn[standard]==0.54.0
+PyJWT==2.15.1
+bcrypt==5.0.0
