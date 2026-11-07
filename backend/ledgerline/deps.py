@@ -50,9 +50,16 @@ def current_principal(
     claims = security.decode_access_token(token.strip(), settings)
     with db.read() as conn:
         user = conn.execute("SELECT * FROM users WHERE id = ?", (claims.get("sub"),)).fetchone()
+        session = conn.execute(
+            "SELECT * FROM sessions WHERE id = ?", (claims.get("sid"),)
+        ).fetchone()
 
     if user is None:
         raise unauthenticated("This session is no longer valid.")
+    if session is None or session["revoked_at"] is not None or session["user_id"] != user["id"]:
+        # Logout, refresh-token reuse or a password change revokes the session,
+        # which kills access tokens immediately rather than at expiry.
+        raise unauthenticated("This session has been revoked; sign in again.")
     if user["status"] != "ACTIVE":
         raise AppError("ACCOUNT_DISABLED", "This account is not active.", status_code=403)
     if claims.get("pwd") != security.password_fingerprint(user["password_hash"]):

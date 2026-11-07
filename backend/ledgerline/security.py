@@ -134,6 +134,7 @@ def password_fingerprint(password_hash: str) -> str:
 def create_access_token(
     *,
     user_id: str,
+    session_id: str,
     password_hash: str,
     settings: Any,
     now: datetime | None = None,
@@ -142,6 +143,7 @@ def create_access_token(
     expires = issued + timedelta(seconds=settings.access_ttl_seconds)
     payload = {
         "sub": user_id,
+        "sid": session_id,
         "typ": "access",
         "jti": uuid.uuid4().hex,
         "pwd": password_fingerprint(password_hash),
@@ -169,7 +171,7 @@ def decode_access_token(token: str, settings: Any) -> dict[str, Any]:
             audience=settings.jwt_audience,
             issuer=settings.jwt_issuer,
             options={
-                "require": ["exp", "iat", "sub", "iss", "aud", "typ"],
+                "require": ["exp", "iat", "sub", "sid", "iss", "aud", "typ"],
                 "verify_aud": True,
                 "verify_iss": True,
                 "verify_exp": True,

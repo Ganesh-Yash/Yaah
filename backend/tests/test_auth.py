@@ -280,3 +280,42 @@ class TestRefreshRotation:
         assert client.post(
             "/api/auth/login", json={"email": "change@example.com", "password": "BrandNewPassphrase42"}
         ).status_code == 200
+
+
+class TestSessionRevocation:
+    def test_logout_kills_the_access_token_immediately(self, api, client):
+        """A logged-out access token must not keep working for 15 minutes."""
+        api.create_user("bye@example.com")
+        tokens = api.login("bye@example.com")
+        headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+        assert client.get("/api/auth/me", headers=headers).status_code == 200
+
+        assert client.post(
+            "/api/auth/logout", json={"refresh_token": tokens["refresh_token"]}, headers=headers
+        ).status_code == 204
+
+        assert client.get("/api/auth/me", headers=headers).status_code == 401
+
+    def test_logout_only_kills_that_session(self, api, client):
+        api.create_user("two.devices@example.com")
+        phone = api.login("two.devices@example.com")
+        laptop = api.login("two.devices@example.com")
+        phone_headers = {"Authorization": f"Bearer {phone['access_token']}"}
+        laptop_headers = {"Authorization": f"Bearer {laptop['access_token']}"}
+
+        client.post("/api/auth/logout", json={"refresh_token": phone["refresh_token"]}, headers=phone_headers)
+
+        assert client.get("/api/auth/me", headers=phone_headers).status_code == 401
+        assert client.get("/api/auth/me", headers=laptop_headers).status_code == 200
+
+    def test_refresh_reuse_kills_the_access_tokens_of_that_session(self, api, client):
+        api.create_user("stolen@example.com")
+        first = api.login("stolen@example.com")
+        second = client.post("/api/auth/refresh", json={"refresh_token": first["refresh_token"]}).json()
+        headers = {"Authorization": f"Bearer {second['access_token']}"}
+        assert client.get("/api/auth/me", headers=headers).status_code == 200
+
+        # The old token is replayed -> the whole family, including this session,
+        # is revoked.
+        client.post("/api/auth/refresh", json={"refresh_token": first["refresh_token"]})
+        assert client.get("/api/auth/me", headers=headers).status_code == 401

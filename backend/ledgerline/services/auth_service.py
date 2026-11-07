@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .. import audit, security
+from .. import audit, ctx as request_ctx, security
 from ..config import Settings
 from ..db import Database, iso_add_seconds, utcnow_iso
 from ..errors import AppError, conflict, invalid_credentials, rate_limited, unauthenticated
@@ -61,23 +61,47 @@ def _create_refresh_token(
     return plaintext, token_id
 
 
+def _create_session(
+    conn: sqlite3.Connection, *, user_id: str, ip: str | None
+) -> str:
+    """One sign-in == one session == one refresh-token family.
+
+    Access tokens carry the session id, so revoking the session (logout, token
+    reuse, password change) invalidates outstanding access tokens immediately
+    instead of leaving them usable until they expire.
+    """
+    session_id = str(uuid.uuid4())
+    now = utcnow_iso()
+    conn.execute(
+        """
+        INSERT INTO sessions (id, user_id, created_at, last_used_at, created_ip, user_agent)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (session_id, user_id, now, now, ip, request_ctx.get_context().user_agent),
+    )
+    return session_id
+
+
 def _issue_pair(
     conn: sqlite3.Connection,
     *,
     user: sqlite3.Row,
     settings: Settings,
-    family_id: str | None = None,
+    session_id: str,
     previous_id: str | None = None,
     ip: str | None = None,
 ) -> TokenPair:
     access, expires_in = security.create_access_token(
-        user_id=user["id"], password_hash=user["password_hash"], settings=settings
+        user_id=user["id"],
+        session_id=session_id,
+        password_hash=user["password_hash"],
+        settings=settings,
     )
     refresh, _ = _create_refresh_token(
         conn,
         user_id=user["id"],
         settings=settings,
-        family_id=family_id,
+        family_id=session_id,
         previous_id=previous_id,
         ip=ip,
     )
@@ -257,7 +281,8 @@ def login(
             "UPDATE users SET failed_login_count = 0, locked_until = NULL, updated_at = ? WHERE id = ?",
             (utcnow_iso(), user["id"]),
         )
-        pair = _issue_pair(conn, user=user, settings=settings, ip=ip)
+        session_id = _create_session(conn, user_id=user["id"], ip=ip)
+        pair = _issue_pair(conn, user=user, settings=settings, session_id=session_id, ip=ip)
         audit.record_in(
             conn, "LOGIN_SUCCESS", actor=None, subject=normalized, target_type="user", target_id=user["id"]
         )
@@ -287,6 +312,10 @@ def refresh(db: Database, settings: Settings, *, refresh_token: str, ip: str | N
                 "UPDATE refresh_tokens SET revoked_at = ? WHERE family_id = ? AND revoked_at IS NULL",
                 (utcnow_iso(), row["family_id"]),
             )
+            conn.execute(
+                "UPDATE sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+                (utcnow_iso(), row["family_id"]),
+            )
             audit.record_in(
                 conn,
                 "REFRESH_TOKEN_REUSE",
@@ -303,12 +332,22 @@ def refresh(db: Database, settings: Settings, *, refresh_token: str, ip: str | N
     if user is None or user["status"] != "ACTIVE":
         raise unauthenticated("This account can no longer sign in.")
 
+    with db.read() as conn:
+        session = conn.execute(
+            "SELECT * FROM sessions WHERE id = ?", (row["family_id"],)
+        ).fetchone()
+    if session is None or session["revoked_at"] is not None:
+        raise unauthenticated("This session has been revoked.")
+
     with db.write() as conn:
+        conn.execute(
+            "UPDATE sessions SET last_used_at = ? WHERE id = ?", (utcnow_iso(), session["id"])
+        )
         pair = _issue_pair(
             conn,
             user=user,
             settings=settings,
-            family_id=row["family_id"],
+            session_id=session["id"],
             previous_id=row["id"],
             ip=ip,
         )
@@ -329,6 +368,10 @@ def logout(db: Database, *, refresh_token: str, actor: Any | None = None) -> Non
             return  # idempotent: logging out twice is not an error
         conn.execute(
             "UPDATE refresh_tokens SET revoked_at = ? WHERE family_id = ? AND revoked_at IS NULL",
+            (utcnow_iso(), row["family_id"]),
+        )
+        conn.execute(
+            "UPDATE sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
             (utcnow_iso(), row["family_id"]),
         )
         audit.record_in(
@@ -361,6 +404,10 @@ def change_password(
         # die immediately too because of the 'pwd' claim fingerprint.
         conn.execute(
             "UPDATE refresh_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
+            (utcnow_iso(), user_id),
+        )
+        conn.execute(
+            "UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
             (utcnow_iso(), user_id),
         )
         audit.record_in(conn, "PASSWORD_CHANGED", target_type="user", target_id=user_id)

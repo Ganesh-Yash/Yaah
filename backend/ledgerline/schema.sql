@@ -25,6 +25,21 @@ CREATE TABLE IF NOT EXISTS users (
     updated_at         TEXT NOT NULL
 );
 
+-- A session is one sign-in (one refresh-token family). Access tokens carry its
+-- id, so logging out revokes the access token immediately instead of leaving it
+-- valid until it expires.
+CREATE TABLE IF NOT EXISTS sessions (
+    id           TEXT PRIMARY KEY,
+    user_id      TEXT NOT NULL REFERENCES users(id),
+    created_at   TEXT NOT NULL,
+    last_used_at TEXT NOT NULL,
+    revoked_at   TEXT,
+    created_ip   TEXT,
+    user_agent   TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions (user_id);
+
 CREATE TABLE IF NOT EXISTS refresh_tokens (
     id             TEXT PRIMARY KEY,
     user_id        TEXT NOT NULL REFERENCES users(id),
