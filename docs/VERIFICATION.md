@@ -23,8 +23,8 @@ python -m pytest -q
 
 | Run | Result | Wall clock |
 |---|---|---|
-| Linux container | **155 passed** | 22.08 s |
-| Windows 11, `cmd.exe` | **155 passed** | 41.35 s |
+| Linux container | **167 passed** | 16.47 s |
+| Windows 11, `cmd.exe` | **155 passed** | 41.35 s — that run predates `tests/test_limits.py`; the suite on this branch is 167 |
 
 Breakdown (from `pytest --collect-only`):
 
@@ -35,7 +35,8 @@ Breakdown (from `pytest --collect-only`):
 | `tests/test_rbac.py` | 16 | role matrix: customer / admin / auditor separation of duties, IDOR |
 | `tests/test_integrity_tamper.py` | 15 | hash-chain verification, tamper detection, append-only enforcement |
 | `tests/test_idempotency.py` | 13 | same key → one effect, key/body mismatch → 409, per-route scoping |
-| `tests/test_http_hardening.py` | 12 | body-size cap, security headers, unknown-path 404 envelope, error shape |
+| `tests/test_http_hardening.py` | 17 | body-size cap (header **and** streamed/chunked), security headers, `frame-ancestors` policy, unknown-path 404 envelope, error shape |
+| `tests/test_limits.py` | 7 | per-account daily outflow cap: shared withdrawal/transfer counter, audit row, concurrency, `0` disables |
 | `tests/test_audit.py` | 9 | audit rows for allowed and denied actions, statement completeness |
 | `tests/test_concurrency.py` | 6 | parallel withdrawals/transfers, one-writer serialisation, balance floor |
 
@@ -79,6 +80,20 @@ Served with `LEDGERLINE_STATIC_DIR` pointing at the built `frontend/dist`:
 | `GET /favicon.ico` | 404 JSON |
 | `GET /assets/nope.js` | 404 JSON (a missing asset is not a page) |
 | `GET /docs` | 200 (OpenAPI UI) |
+| `POST /api/auth/login`, chunked, 120 KiB body (no `Content-Length`) | 413 `PAYLOAD_TOO_LARGE` with a `request_id` |
+| `POST /api/auth/login`, small body | normal validation (401 for bad credentials) |
+| CSP header, `LEDGERLINE_ENV=dev` | `frame-ancestors *` (preview can embed) |
+| CSP header, `LEDGERLINE_ENV=prod` | `frame-ancestors 'none'` |
+
+The chunked check, verbatim:
+
+```
+$ python -c 'open("big.json","w").write("{\"email\":\"" + "a"*120000 + "\"}")'
+$ curl -s -X POST -H "Transfer-Encoding: chunked" -H "Content-Type: application/json" \
+       --data-binary @big.json http://127.0.0.1:8000/api/auth/login -w " [HTTP %{http_code}]"
+{"error":{"code":"PAYLOAD_TOO_LARGE","message":"Request body must be at most 65536 bytes.",
+          "details":{},"request_id":"req_d8b8d5b1e0d14cde8ccd_73"}} [HTTP 413]
+```
 
 ## 4. Frontend build
 
@@ -109,4 +124,5 @@ Stated plainly, because the README does not claim it:
 | Running the Docker **container** | the development machine has no Docker daemon | the *image build* is verified by CI (`docker build -t ledgerline:ci .`, green) |
 | PostgreSQL | no server available here | the port is documented in `docs/ARCHITECTURE.md` as a design, clearly marked untested |
 | Multi-node / horizontal scaling | SQLite, single writer | listed as a known limitation, not a feature |
+| Chargeback / reversal workflow | out of the brief's scope | still listed as an open gap in `THREATS.md` (R5 keeps only that half) |
 | Demo video | could not record one in this environment | listed as the one missing deliverable |

@@ -42,6 +42,12 @@ def meta(request: Request) -> dict:
         "environment": settings.env,
         "supported_currencies": list(SUPPORTED_CURRENCIES),
         "max_amount": format_amount(settings.max_amount_minor),
+        "daily_outflow_limit": (
+            format_amount(settings.daily_outflow_limit_minor)
+            if settings.daily_outflow_limit_minor > 0
+            else "unlimited"
+        ),
+        "max_request_bytes": settings.max_request_bytes,
         "idempotency_header": "Idempotency-Key",
         "roles": ["ADMIN", "CUSTOMER", "AUDITOR"],
     }

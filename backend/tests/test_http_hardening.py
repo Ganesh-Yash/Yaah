@@ -153,3 +153,85 @@ def test_single_port_mode_serves_the_spa_but_never_html_for_api(tmp_path, settin
         # Missing static assets stay 404 instead of becoming HTML with a 200.
         assert client.get("/favicon.ico").status_code == 404
         assert client.get("/assets/missing.js").status_code == 404
+
+
+def test_streamed_body_is_capped_without_a_content_length(client):
+    """Content-Length is a claim: a chunked upload carries none at all.
+
+    The cap has to be enforced on the bytes that actually arrive, or a client
+    can stream an unbounded body past a header-only check.
+    """
+
+    def oversized_stream():
+        for _ in range(8):
+            yield b"x" * 16_384  # 128 KiB, twice the 64 KiB cap
+
+    response = client.post(
+        "/api/auth/login",
+        content=oversized_stream(),
+        headers={"Content-Type": "application/json"},
+    )
+    assert response.status_code == 413, response.text
+    body = response.json()
+    assert body["error"]["code"] == "PAYLOAD_TOO_LARGE"
+    # The 413 is produced below the context middleware, so it still carries the
+    # request id and the normal security headers.
+    assert response.headers["X-Request-ID"].startswith("req_")
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+
+
+def test_a_streamed_body_inside_the_cap_is_accepted(client):
+    """The byte counter must not reject legitimate traffic."""
+
+    def small_stream():
+        yield b'{"email": "nobody@example.com", "password": "'
+
+    response = client.post(
+        "/api/auth/login",
+        content=small_stream(),
+        headers={"Content-Type": "application/json"},
+    )
+    # Anything but 413: the body fits, so normal validation applies.
+    assert response.status_code != 413, response.text
+
+
+def test_frame_ancestors_is_none_in_production(tmp_path, settings):
+    """R9: a production deployment must not be framable by default."""
+    from fastapi.testclient import TestClient
+
+    from ledgerline.main import create_app
+
+    prod = settings.with_overrides(
+        env="prod",
+        database_path=str(tmp_path / "prod.db"),
+        jwt_secret="prod-secret-" + "y" * 40,
+    )
+    app = create_app(prod)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        csp = client.get("/api/health").headers["Content-Security-Policy"]
+    assert "frame-ancestors 'none'" in csp
+
+
+def test_frame_ancestors_stays_permissive_in_dev_and_can_be_overridden(tmp_path, settings):
+    """The hosted preview embeds the dashboard, so dev keeps a permissive CSP."""
+    from fastapi.testclient import TestClient
+
+    from ledgerline.main import create_app
+
+    dev_app = create_app(settings.with_overrides(database_path=str(tmp_path / "dev.db")))
+    with TestClient(dev_app, raise_server_exceptions=False) as client:
+        assert "frame-ancestors *" in client.get("/api/health").headers["Content-Security-Policy"]
+
+    pinned = settings.with_overrides(
+        database_path=str(tmp_path / "pinned.db"),
+        csp_frame_ancestors="'self'",
+    )
+    pinned_app = create_app(pinned)
+    with TestClient(pinned_app, raise_server_exceptions=False) as client:
+        assert "frame-ancestors 'self'" in client.get("/api/health").headers["Content-Security-Policy"]
+
+
+def test_limits_are_advertised_in_meta(client):
+    meta = client.get("/api/meta").json()
+    assert meta["max_request_bytes"] == 64 * 1024
+    assert meta["daily_outflow_limit"] == "1000000.00"

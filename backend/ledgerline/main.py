@@ -94,6 +94,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # --- middleware -------------------------------------------------------
 
+    # Added first, so it sits *below* the request-context middleware: the 413 it
+    # produces still gets the request id and the security headers.
+    app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_request_bytes)
+
     @app.middleware("http")
     async def request_context_middleware(request: Request, call_next):  # type: ignore[no-untyped-def]
         incoming = request.headers.get("x-request-id")
@@ -111,12 +115,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         try:
             length = request.headers.get("content-length")
-            if length is not None and length.isdigit() and int(length) > MAX_BODY_BYTES:
+            if length is not None and length.isdigit() and int(length) > settings.max_request_bytes:
                 response: Response = JSONResponse(
                     status_code=413,
                     content=_error_payload(
                         "PAYLOAD_TOO_LARGE",
-                        f"Request body must be at most {MAX_BODY_BYTES} bytes.",
+                        f"Request body must be at most {settings.max_request_bytes} bytes.",
                         request_id,
                     ),
                 )
@@ -133,7 +137,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'; "
-            "frame-ancestors *"
+            f"frame-ancestors {settings.frame_ancestors}"
         )
         if request.url.path.startswith("/api"):
             response.headers["Cache-Control"] = "no-store"
@@ -274,6 +278,63 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             }
 
     return app
+
+
+class BodySizeLimitMiddleware:
+    """Refuse an oversized request body while it is still streaming.
+
+    ``Content-Length`` is a claim, not a fact: a chunked request carries no
+    length at all, so a header-only check is trivially bypassed. This middleware
+    counts real bytes on the ASGI receive channel and answers ``413`` before the
+    body is buffered, whatever encoding the client chose.
+    """
+
+    def __init__(self, app: Any, max_bytes: int = MAX_BODY_BYTES) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        seen = 0
+        exceeded = False
+        response_started = False
+
+        async def limited_receive() -> dict:
+            nonlocal seen, exceeded
+            message = await receive()
+            if message["type"] == "http.request" and not exceeded:
+                seen += len(message.get("body", b""))
+                if seen > self.max_bytes:
+                    exceeded = True
+                    # Report end-of-body so the application cannot wait for more
+                    # bytes; whatever it answers is swallowed by guarded_send.
+                    return {"type": "http.request", "body": b"", "more_body": False}
+            return message
+
+        async def guarded_send(message: dict) -> None:
+            nonlocal response_started
+            if exceeded:
+                return
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
+        await self.app(scope, limited_receive, guarded_send)
+
+        if exceeded and not response_started:
+            request_id = (scope.get("state") or {}).get("request_id") or "unavailable"
+            response = JSONResponse(
+                status_code=413,
+                content=_error_payload(
+                    "PAYLOAD_TOO_LARGE",
+                    f"Request body must be at most {self.max_bytes} bytes.",
+                    request_id,
+                ),
+            )
+            await response(scope, receive, send)
 
 
 class SPAStaticFiles(StaticFiles):

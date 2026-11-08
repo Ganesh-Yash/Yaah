@@ -8,7 +8,7 @@ Everything in the "Evidence" column is executable:
 
 ```bash
 cd backend
-pytest -q                                            # 155 tests
+pytest -q                                            # 167 tests
 python scripts/redteam.py --base-url http://localhost:8000   # 27 live checks
 ```
 
@@ -170,13 +170,21 @@ them.
 | **R2** | Refresh token in `localStorage` | Needed for a reload-surviving session without a cookie/CSRF layer | Move to `HttpOnly; Secure; SameSite=Strict` refresh cookie + double-submit CSRF token; keep access tokens in memory |
 | **R3** | Single-node SQLite | One writer is *sufficient* for correctness at this scale, and it made the concurrency guarantees provable in tests | Port to Postgres: `SELECT … FOR UPDATE` in id order, `SERIALIZABLE` or conditional updates unchanged; see docs/ARCHITECTURE.md |
 | **R4** | In-memory rate limits | The process is the deployment unit; account lockout is DB-backed | Redis-backed limiter with the same call signatures |
-| **R5** | No daily/velocity limits, no chargeback or reversal workflow | Out of scope for the seven-day brief | Add per-account daily limits and an audited two-person reversal flow |
 | **R6** | Reads are not audited | Auditing every statement read is a large write amplification and a privacy liability | Optional read-audit with sampling, or only for staff access to customer data |
 | **R7** | Transfer destination enumeration | 12-digit random numbers, throttled, audited | Transfer by alias / saved payee with confirmation |
 | **R8** | No 2FA, no email verification, no password reset | Demo scope | TOTP for staff at minimum; staff roles are the higher-value accounts |
-| **R9** | `frame-ancestors *` in the CSP | The hosted preview embeds the dashboard in an iframe; `DENY` breaks the demo | Set `frame-ancestors 'none'` in production where embedding is not required |
-| **R10** | Chunked body limit | FastAPI/Starlette bound the parse cost; the JSON parser is the real limit | Add an ASGI body-limit middleware that counts bytes as they stream |
 | **R11** | Account numbers are not secret | They are printed on statements by design | Keep them non-secret but rate-limit lookups; never use them as an authenticator |
+
+### Closed since the first draft
+
+These three started life in the table above. They are now controls with tests behind them, so they
+were removed from the accepted-risk list rather than left there to look thorough.
+
+| ID | Was | Now enforced by | Proven by |
+|---|---|---|---|
+| **R5** | no velocity limits, so a stolen session could drain an account in seconds | per-account daily outflow cap (`LEDGERLINE_DAILY_OUTFLOW_LIMIT_MINOR`, default 1,000,000.00). Withdrawals **and** outgoing transfers debit the same per-UTC-day counter, read inside the same `BEGIN IMMEDIATE` transaction as the posting, refused as `409 DAILY_LIMIT_EXCEEDED` with `limit` / `used_today` / `remaining_today` and audited as a `DENY` row. Still open: chargeback/reversal workflow | `tests/test_limits.py` (7 tests, including 10 concurrent withdrawals against a 100.00 cap → exactly 3 succeed) |
+| **R9** | `frame-ancestors *` everywhere, so any site could frame the dashboard | the CSP is derived from the environment: `frame-ancestors 'none'` when `LEDGERLINE_ENV=prod`, `*` in dev so the hosted preview keeps working, overridable with `LEDGERLINE_CSP_FRAME_ANCESTORS` | `test_frame_ancestors_is_none_in_production`, `test_frame_ancestors_stays_permissive_in_dev_and_can_be_overridden` |
+| **R10** | the body cap trusted `Content-Length`, which a chunked request does not send | `BodySizeLimitMiddleware` counts real bytes on the ASGI receive channel and answers `413` before the body is buffered — it never trusts a header | `test_streamed_body_is_capped_without_a_content_length`, plus a live `curl` chunked upload (see `docs/VERIFICATION.md`) |
 
 ---
 

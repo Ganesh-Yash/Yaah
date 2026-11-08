@@ -22,6 +22,7 @@ from __future__ import annotations
 import sqlite3
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Any, Iterable
 
 from . import chain
@@ -51,6 +52,33 @@ def get_account_by_number(conn: sqlite3.Connection, account_number: str) -> sqli
     return conn.execute(
         "SELECT * FROM accounts WHERE account_number = ?", (account_number,)
     ).fetchone()
+
+
+def daily_outflow_minor(conn: sqlite3.Connection, account_id: str, *, day: str | None = None) -> int:
+    """Total value that has left ``account_id`` during one UTC day.
+
+    Counts every negative ledger leg on the account -- withdrawals and outgoing
+    transfers alike -- so a customer cannot sidestep a daily limit by switching
+    from one endpoint to the other. System accounts are never limited.
+    """
+    day_start = datetime.strptime(day or utcnow_iso()[:10], "%Y-%m-%d")
+    day_end = day_start + timedelta(days=1)
+    row = conn.execute(
+        """
+        SELECT COALESCE(SUM(-amount_minor), 0) AS outflow
+          FROM ledger_entries
+         WHERE account_id = ?
+           AND amount_minor < 0
+           AND created_at >= ?
+           AND created_at < ?
+        """,
+        (
+            account_id,
+            day_start.strftime("%Y-%m-%dT00:00:00"),
+            day_end.strftime("%Y-%m-%dT00:00:00"),
+        ),
+    ).fetchone()
+    return int(row["outflow"])
 
 
 def system_account_id(currency: str) -> str:
