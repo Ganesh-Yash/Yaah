@@ -196,6 +196,10 @@ replays). There is no third outcome, which is exactly the window that makes naiv
 pay twice. Failed movements (insufficient funds, frozen account) roll back and are **not** cached:
 nothing moved, so a retry with the same key is a fresh, safe attempt.
 
+The dashboard makes this visible instead of hiding it in curl: the receipt shows the key and offers
+**Send the same request again**, which re-posts the identical body with the identical key and comes
+back as an `idempotent replay` with an unchanged balance.
+
 ### 4. History is append-only and chained
 
 `ledger_entries`, `transactions` and `audit_log` have `BEFORE UPDATE`/`BEFORE DELETE` triggers that

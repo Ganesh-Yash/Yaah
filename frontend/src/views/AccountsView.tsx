@@ -188,6 +188,14 @@ function MoneyDialog({
 
   async function submit(event: FormEvent) {
     event.preventDefault();
+    await send();
+  }
+
+  // The same body with the same key: the server answers with the original
+  // receipt and moves nothing. This is what "at most once" looks like from the
+  // outside, so the receipt offers it as a button rather than hiding it behind
+  // a terminal.
+  async function send() {
     setBusy(true);
     setError(null);
     try {
@@ -207,6 +215,7 @@ function MoneyDialog({
       await onSettled();
     } catch (caught) {
       setError(caught instanceof ApiError ? caught : new ApiError(0, "NETWORK", "Network error."));
+      setResult(null);
     } finally {
       setBusy(false);
     }
@@ -251,8 +260,21 @@ function MoneyDialog({
                   .join("  ")}
               </dd>
             </div>
+            <div>
+              <dt>Idempotency-Key</dt>
+              <dd className="mono tiny">{key}</dd>
+            </div>
           </dl>
-          <Button onClick={finish}>Done</Button>
+          <div className="row">
+            <Button onClick={finish}>Done</Button>
+            <Button variant="ghost" busy={busy} onClick={() => void send()}>
+              Send the same request again
+            </Button>
+          </div>
+          <p className="tiny muted">
+            The second send reuses key <code className="mono">{key}</code> with the same body — the
+            server must return this receipt again instead of paying twice.
+          </p>
         </div>
       ) : (
         <form className="form" onSubmit={submit}>

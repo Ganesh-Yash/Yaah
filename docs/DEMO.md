@@ -37,9 +37,13 @@ Click **Statement**: every row is a ledger entry with a running balance, newest 
 
 ## 1:15 — The same request cannot pay twice
 
-Repeat the transfer with the *same* form (the key is displayed above the button). Instead of a second
-movement, the dialog returns the original receipt with an **idempotent replay** badge and the balance
-is unchanged.
+On the receipt, click **Send the same request again**. Same body, same `Idempotency-Key` — so instead
+of a second movement the dialog returns the original receipt with an **idempotent replay** badge, the
+same transaction id, and an unchanged balance.
+
+Do **not** press *Done* and re-open the dialog: that is a new intent with a new key, and a second
+payment is the correct behaviour there. Worth saying out loud — it shows the key is scoped to the
+request, not to the form.
 
 The API version, if you prefer a terminal:
 

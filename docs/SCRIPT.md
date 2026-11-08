@@ -71,14 +71,15 @@ materialised sum of immutable entries, and the verifier recomputes it from scrat
 
 ## 1:15 — 2:00 · The same request cannot pay twice
 
-**On screen:** submit the same transfer form again — same idempotency key, do not touch it. Let the
-**idempotent replay** badge and the unchanged balance sit on screen for two full seconds. Then, if you
-have time, change the amount to 999.00 with the same key and show the `409`.
+**On screen:** on the receipt, click **Send the same request again** (same key, same body). Let the
+**idempotent replay** badge, the identical transaction id and the unchanged balance sit on screen for
+two full seconds. Optional extra, from Window 2: reuse that key with a *different* amount and show the
+`409 IDEMPOTENCY_KEY_REUSED`.
 
 **Say** (~85 words):
 
-> Now the part that separates this from a tutorial project. I'll submit the exact same transfer
-> again. Nothing happens. The response is the original receipt, marked idempotent replay, and the
+> Now the part that separates this from a tutorial project. I'll send the exact same transfer again.
+> Nothing happens. The response is the original receipt, marked idempotent replay, and the
 > balance stays 1,149.50. The reason is architectural, not a UI trick: the record of the request and
 > the money movement are written in the same database transaction. There is no moment where money has
 > moved and the record hasn't been saved — which is the classic double-payment bug. And if I reuse
@@ -196,6 +197,62 @@ else's"). Keep 3, 4 and 6 — they are the ones a judge cannot get from reading 
   which is the point."
 - **Numbers to have memorised:** 1,250 → 1,149.50; Bob 300 → 400.50; 100 → 0.00; 10 of 20; 167 tests;
   27 checks; 9 verification checks.
+
+---
+
+## Where each beat happens (operator run sheet)
+
+Three surfaces, opened once, before you hit record:
+
+| Surface | What it is | Opened how |
+|---|---|---|
+| **Window 1** | the server. Do not touch it after it boots | `cd backend` → `..\.venv\Scripts\uvicorn.exe ledgerline.main:app --port 8000` |
+| **Window 2** | the terminal for the race, the tamper and the attack suite | `cd backend` (same venv, no second activation needed if you call the exe by path) |
+| **Browser** | one tab on **http://localhost:8000** | single-port mode, so UI and API share the port |
+
+Two things to write on paper before recording: **Bob's account number** (third in the seed line) and
+the **`Payout Demo`** account number (printed when the admin opens it). Hunting for a number on camera
+is the most common way a demo loses a minute.
+
+| Beat | Surface | Exact action |
+|---|---|---|
+| 0:00 | Browser | login screen → click the **account holder** chip (fills Alice) → **Sign in**. Two cards, each showing its 12-digit number |
+| 0:30 | Browser | **Transfer** on *Alice — Everyday* → "Destination account number" = Bob's → Amount `100.50` → Description `rent` → **Transfer**. Receipt shows transaction id, new balance, **Ledger legs** `+100.50  −100.50`, and the `Idempotency-Key` |
+| 1:15 | Browser | on that same receipt, click **Send the same request again** → an *idempotent replay* badge appears, the transaction id is identical, the balance does not move. Do **not** press Done and re-open: that starts a new intent with a new key (which is correct — and worth saying out loud) |
+| 2:00 (a) | Browser | Sign out → **Register** `demo.race@ledgerline.test` / `RaceDemoPass!2024` |
+| 2:00 (b) | Browser | Sign out → **admin** chip → **Administration** → **Open account**: owner `demo.race@ledgerline.test`, name `Payout Demo`, currency USD. Note the number it prints |
+| 2:00 (c) | Browser | Sign out → sign in as `demo.race@ledgerline.test` → **Deposit** `100.00` |
+| 2:00 (d) | **Window 2** | `..\.venv\Scripts\python.exe scripts\demo_race.py --email demo.race@ledgerline.test --password "RaceDemoPass!2024" --account "Payout Demo"` → `10 × 201`, `10 × 409`, balance `0.00` |
+| 2:45 (a) | Browser | Sign out → **admin** chip → **Administration** → open one more account (shows the admin's real job), then **Accounts** tab → **Freeze** on a card → **Unfreeze** |
+| 2:45 (b) | Browser | still as admin → **Deposit** on any card → the dialog returns **403 FORBIDDEN**. That refusal is the shot |
+| 2:45 (c) | Browser | Sign out → **auditor** chip → **Audit & integrity** → the trail, including `AUTHZ_DENIED` rows from 2:45 (b) |
+| 3:30 (a) | Browser | auditor → **Audit & integrity** → **Re-run verification** → `all checks passed`, 9 green, head hashes at the bottom |
+| 3:30 (b) | **Window 2** | the tamper one-liner (below) |
+| 3:30 (c) | Browser | **Re-run verification** again → `INTEGRITY FAILURE`, `ledger_hash_chain` fails with `first_bad_id: 1` |
+| 4:15 | **Window 2** | `..\.venv\Scripts\python.exe scripts\redteam.py --base-url http://127.0.0.1:8000` → `27/27 checks passed` |
+| 4:45 | Browser | Sign out → **account holder** chip → the two balances again |
+
+The tamper, for Windows `cmd` from `backend\`:
+
+```bat
+..\.venv\Scripts\python.exe -c "import sqlite3;c=sqlite3.connect('data/ledgerline.db');c.executescript('DROP TRIGGER trg_ledger_no_update; UPDATE ledger_entries SET amount_minor=1 WHERE id=1;');c.commit()"
+```
+
+**After the tamper the database is deliberately broken.** Stop the server (Ctrl+C in Window 1), delete
+`data\ledgerline.db*`, re-seed, and restart before any second take — otherwise every verification you
+show afterwards is red.
+
+### Order that is cheap to get wrong
+
+- **Do the attack suite last.** It writes throwaway users and transactions into the same database, so
+  running it at 2:00 would change the balances you narrate at 1:15.
+- **The race needs its own account.** Never fire it at Alice's 1,250.00: twenty 10.00 withdrawals all
+  succeed and there is nothing to see.
+- **Register before opening.** `Open account` takes an owner email that already exists; the register
+  form is on the sign-in screen, so this costs one extra sign-out.
+- **One tab is enough.** Switching roles means signing out and back in; two profiles work too, but keep
+  the mouse on one surface so the camera does not lose the action.
+
 
 ---
 
