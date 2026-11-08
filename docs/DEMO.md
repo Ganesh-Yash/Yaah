@@ -6,10 +6,10 @@ provability — rather than describing them. Times are cumulative.
 **Setup:** `docker compose up --build` (or the two-terminal local setup), then open
 `http://localhost:8000`. Demo password for every seeded user: `LedgerLine!Demo2024`.
 
-
 > Recording it? **[SCRIPT.md](SCRIPT.md)** has the word-for-word narration, second by second,
 > plus a 12-slide deck ([LedgerLine-deck.pptx](LedgerLine-deck.pptx)) whose speaker notes carry
 > the same timings.
+
 ---
 
 ## 0:00 — Sign in as an account holder
