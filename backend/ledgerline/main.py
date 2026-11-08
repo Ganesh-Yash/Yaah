@@ -240,9 +240,38 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(admin.router)
     app.include_router(audit_views.router)
 
+    # Any unmatched /api path must get the JSON error envelope, never the SPA.
+    # Registered after the real routers (so they win) and before the static
+    # mount (so it is not swallowed by the index.html fallback).
+    @app.api_route(
+        "/api/{unmatched:path}",
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+        include_in_schema=False,
+    )
+    def api_route_not_found(unmatched: str) -> None:
+        # Deliberately 404 for every method: an API client must never be handed
+        # the SPA's index.html, and a consistent 404 is easier to reason about
+        # than a 405 that only some deployments produce.
+        raise AppError("NOT_FOUND", "Resource not found.", status_code=404)
+
     static_dir = Path(settings.static_dir) if settings.static_dir else None
     if static_dir and static_dir.is_dir():
         app.mount("/", SPAStaticFiles(directory=str(static_dir), html=True), name="spa")
+    else:
+        @app.get("/", include_in_schema=False)
+        def service_root() -> dict:
+            # API-only mode: say where the UI is instead of a cryptic 404.
+            return {
+                "service": "ledgerline-api",
+                "version": __version__,
+                "docs": "/docs",
+                "health": "/api/health",
+                "note": (
+                    "The dashboard is not mounted in this process. In development it is "
+                    "served by Vite on http://localhost:5173; set LEDGERLINE_STATIC_DIR to "
+                    "serve it from this port."
+                ),
+            }
 
     return app
 
@@ -251,15 +280,27 @@ class SPAStaticFiles(StaticFiles):
     """Serve the built SPA, falling back to index.html for client-side routes."""
 
     async def get_response(self, path: str, scope):  # type: ignore[no-untyped-def]
+        # Never answer an /api path with HTML: a missing endpoint must look like
+        # a missing endpoint to an API client.
+        if path == "api" or path.startswith("api/"):
+            raise StarletteHTTPException(status_code=404)
         try:
             response = await super().get_response(path, scope)
         except StarletteHTTPException as exc:
-            if exc.status_code == 404:
-                return await super().get_response("index.html", scope)
-            raise
-        if response.status_code == 404:
-            return await super().get_response("index.html", scope)
-        return response
+            if exc.status_code != 404:
+                raise
+            return await self._spa_fallback(path, scope)
+        if response.status_code != 404:
+            return response
+        return await self._spa_fallback(path, scope)
+
+    async def _spa_fallback(self, path: str, scope):  # type: ignore[no-untyped-def]
+        # Client-side routes (/audit, /accounts/42) get index.html; a missing
+        # asset such as /favicon.ico or /assets/x.js stays an honest 404
+        # instead of being rewritten into HTML with a 200.
+        if "." in Path(path).name:
+            raise StarletteHTTPException(status_code=404)
+        return await super().get_response("index.html", scope)
 
 
 app = create_app()

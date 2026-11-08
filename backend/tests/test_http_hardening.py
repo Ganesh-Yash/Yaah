@@ -24,10 +24,13 @@ def test_unknown_route_uses_the_error_envelope(client):
     assert "Traceback" not in response.text
 
 
-def test_method_not_allowed(client):
-    response = client.delete("/api/health")
-    assert response.status_code == 405
-    assert response.json()["error"]["code"] == "METHOD_NOT_ALLOWED"
+def test_unknown_api_path_is_json_404_for_every_method(client):
+    """Never HTML, never a confusing 405 that only some deployments produce."""
+    for method in ("get", "post", "delete", "patch"):
+        response = getattr(client, method)("/api/does-not-exist")
+        assert response.status_code == 404, (method, response.text)
+        assert response.headers["content-type"].startswith("application/json")
+        assert response.json()["error"]["code"] == "NOT_FOUND"
 
 
 def test_security_headers_on_every_response(client):
@@ -105,3 +108,48 @@ def test_openapi_is_available_for_reviewers(client):
     paths = schema.json()["paths"]
     assert "/api/transfers" in paths
     assert "/api/auditor/integrity" in paths
+
+
+def test_dev_root_explains_where_the_ui_is(client):
+    """API-only mode: `/` should say where the dashboard lives, not 404."""
+    response = client.get("/")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["service"] == "ledgerline-api"
+    assert body["docs"] == "/docs"
+    assert body["health"] == "/api/health"
+
+    # ... while an unknown API path is still JSON.
+    missing = client.get("/api/does-not-exist")
+    assert missing.status_code == 404
+    assert missing.headers["content-type"].startswith("application/json")
+
+
+def test_single_port_mode_serves_the_spa_but_never_html_for_api(tmp_path, settings):
+    """The bug this guards: an unknown /api path must not return index.html."""
+    from fastapi.testclient import TestClient
+
+    from ledgerline.main import create_app
+
+    (tmp_path / "index.html").write_text("<!doctype html><title>spa</title>", encoding="utf-8")
+    app = create_app(settings.with_overrides(static_dir=str(tmp_path)))
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        root = client.get("/")
+        assert root.status_code == 200
+        assert "spa" in root.text
+
+        # A client-side route falls back to the SPA shell...
+        deep_link = client.get("/audit")
+        assert deep_link.status_code == 200
+        assert "spa" in deep_link.text
+
+        # ...but API paths never do.
+        missing_api = client.get("/api/nope")
+        assert missing_api.status_code == 404
+        assert missing_api.headers["content-type"].startswith("application/json")
+        assert missing_api.json()["error"]["code"] == "NOT_FOUND"
+
+        # Missing static assets stay 404 instead of becoming HTML with a 200.
+        assert client.get("/favicon.ico").status_code == 404
+        assert client.get("/assets/missing.js").status_code == 404
