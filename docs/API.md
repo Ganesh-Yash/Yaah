@@ -17,6 +17,10 @@ carry both a formatted string (`amount: "25.50"`) and integer minor units (`amou
 stored response (`200`, `Idempotent-Replay: true`). Replaying it with a different body is
 `409 IDEMPOTENCY_KEY_REUSED`.
 
+**Unknown paths.** Anything under `/api` that does not exist returns the JSON 404 envelope for
+every HTTP method. The single-page app is never served in place of an API response, so a typo in a
+client path fails loudly instead of returning HTML with a 200.
+
 **Errors.** Every failure:
 
 ```json
