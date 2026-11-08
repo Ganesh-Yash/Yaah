@@ -12,7 +12,7 @@ an auditor can independently verify.
 |---|---|
 | **Backend** | Python 3.11+ / FastAPI, SQLite (WAL) |
 | **Frontend** | React 18 + TypeScript + Vite |
-| **Tests** | 155 automated tests, including a live-server concurrency suite |
+| **Tests** | 167 automated tests, including a live-server concurrency suite |
 | **Attack suite** | 27/27 checks against a running instance (`scripts/redteam.py`) |
 | **Status** | Deployed and runnable end to end; see [known limitations](#known-limitations) |
 
@@ -62,6 +62,8 @@ Money movements are atomic, double-entry and idempotent:
   endpoint
 - every money-moving request requires an `Idempotency-Key`; the key record is committed in the same
   database transaction as the movement, so retries cannot double-pay
+- each account has a daily outflow cap that withdrawals *and* transfers debit, so a stolen session
+  cannot drain a balance in one burst — the refusal is a `409` and lands in the audit trail
 
 ## The ten requirements
 
@@ -76,7 +78,7 @@ Money movements are atomic, double-entry and idempotent:
 | 7 | Database transaction and concurrency protection | `db.py` (`BEGIN IMMEDIATE`), `ledger.py::apply_legs` | `tests/test_concurrency.py` (6 live-server scenarios) |
 | 8 | Append-only audit trail and transaction statements | `schema.sql` triggers, `audit.py`, `services/accounts_service.py::statement` | `tests/test_audit.py` (9), `tests/test_integrity_tamper.py` |
 | 9 | Account-level ownership and access-control checks | `fetch_authorized_account`, `require_customer` | `tests/test_rbac.py::TestAccountIsolation` |
-| 10 | Automated security, concurrency and transaction tests | `backend/tests/*`, `scripts/redteam.py` | 155 tests + 27 attack checks |
+| 10 | Automated security, concurrency and transaction tests | `backend/tests/*`, `scripts/redteam.py` | 167 tests + 27 attack checks |
 
 The React dashboard, deployment files, seed data and API documentation are in place as well; the
 demo video is the one deliverable I could not record here (see [known limitations](#known-limitations)).
@@ -95,7 +97,7 @@ docker compose up --build
 > myself. The image *is* built on every push by CI (`docker build -t ledgerline:ci .`, job "Docker
 > image builds"), which is green on `main`, so the Dockerfile in this repository is known to build —
 > but "builds" is not "ran here". Option B is the path I exercised end to end: seeded, served and
-> attacked against a live process, behind 155 automated tests.
+> attacked against a live process, behind 167 automated tests.
 
 ### Option B — local development (two terminals)
 
@@ -122,7 +124,7 @@ Linux and macOS work the same way; on Windows use `set` instead of `export` in C
 ```bash
 cd backend
 pip install -r requirements-dev.txt
-pytest -q                                  # 155 tests
+pytest -q                                  # 167 tests
 uvicorn ledgerline.main:app --port 8000 &  # then, against a running instance:
 python scripts/redteam.py --base-url http://localhost:8000
 ```
@@ -224,6 +226,23 @@ never a stack trace, SQL fragment or internal path:
 
 Cross-tenant reads return **404, not 403**, so account ids cannot be probed for existence.
 
+### 7. Limits live where the money moves
+
+Three transport and velocity controls that used to be listed as accepted risks, now enforced and
+tested (`tests/test_limits.py`, `tests/test_http_hardening.py`):
+
+- **Per-account daily outflow cap.** Withdrawals and outgoing transfers debit one counter per UTC
+  day. The counter is read inside the same `BEGIN IMMEDIATE` transaction as the posting, so ten
+  concurrent requests cannot all squeeze under the cap — the test fires ten and gets exactly three.
+  Refusals are `409 DAILY_LIMIT_EXCEEDED` with `limit` / `used_today` / `remaining_today`, and are
+  audited as `DENY`. Configure with `LEDGERLINE_DAILY_OUTFLOW_LIMIT_MINOR` (`0` disables it).
+- **A body cap that counts bytes, not headers.** `Content-Length` is a claim; a chunked request sends
+  none. The ASGI middleware counts what actually arrives and answers `413` before buffering it
+  (`LEDGERLINE_MAX_REQUEST_BYTES`, default 64 KiB).
+- **Framing denied in production.** The CSP is environment-derived: `frame-ancestors 'none'` when
+  `LEDGERLINE_ENV=prod`, `*` in dev so the hosted preview can embed the dashboard. Override with
+  `LEDGERLINE_CSP_FRAME_ANCESTORS`.
+
 ## API
 
 Full request/response examples are in [docs/API.md](docs/API.md); the running service also serves
@@ -258,7 +277,7 @@ Full request/response examples are in [docs/API.md](docs/API.md); the running se
 
 | Evidence | Where |
 |---|---|
-| 155 automated tests (unit, integration, live-server concurrency) | `backend/tests/` |
+| 167 automated tests (unit, integration, live-server concurrency) | `backend/tests/` |
 | 27-check attack run against a live instance | `backend/scripts/redteam.py` |
 | Concurrency: 20 racing withdrawals, 30 racing deposits, 20 duplicate keys, 40 opposite transfers | `backend/tests/test_concurrency.py` |
 | Tamper detection: triggers dropped, history edited, verifier catches it | `backend/tests/test_integrity_tamper.py` |
@@ -285,7 +304,7 @@ backend/
     seed.py            system accounts + demo data
   scripts/seed.py      database initialiser
   scripts/redteam.py   attack suite against a running instance
-  tests/               155 tests
+  tests/               167 tests
 frontend/
   src/api.ts           typed client, idempotency-aware, refresh handling
   src/views/           auth, accounts, administration, audit
@@ -306,6 +325,9 @@ All settings are environment variables; see [.env.example](.env.example) and
 | `LEDGERLINE_DATABASE_PATH` | `./data/ledgerline.db` | the SQLite file |
 | `LEDGERLINE_CORS_ORIGINS` | localhost dev origins | comma-separated allowlist |
 | `LEDGERLINE_MAX_AMOUNT_MINOR` | `10000000` (100,000.00) | per-movement ceiling |
+| `LEDGERLINE_DAILY_OUTFLOW_LIMIT_MINOR` | `100000000` (1,000,000.00) | per-account daily outflow cap; `0` disables |
+| `LEDGERLINE_MAX_REQUEST_BYTES` | `65536` | request body cap, counted as it streams |
+| `LEDGERLINE_CSP_FRAME_ANCESTORS` | derived | `'none'` in prod, `*` in dev |
 | `LEDGERLINE_LOGIN_MAX_FAILURES` | `5` | per-account lockout |
 | `LEDGERLINE_LOGIN_MAX_FAILURES_PER_IP` | `50` | password-spray ceiling |
 | `LEDGERLINE_DEMO_SEED` | `0` | opt-in demo credentials |

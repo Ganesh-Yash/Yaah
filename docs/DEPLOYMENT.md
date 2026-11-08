@@ -9,7 +9,7 @@ origin, so there is no CORS surface and no second host to secure.
 > never started the container myself, but the "Docker image builds" job runs
 > `docker build -t ledgerline:ci .` on every push and is green on `main` — the multi-stage build
 > itself is known-good, not assumed. Option 2 is the path exercised end to end here (seeded, served,
-> attacked) and is backed by 155 tests plus a 27-check live attack suite.
+> attacked) and is backed by 167 tests plus a 27-check live attack suite.
 
 ```bash
 cp .env.example .env
@@ -107,6 +107,9 @@ bucket. Behind a proxy, set it.
 | `LEDGERLINE_ENV` | `dev` | `prod` refuses to boot without a ≥32-char JWT secret and enables HSTS |
 | `LEDGERLINE_JWT_SECRET` | ephemeral in dev | signing key; rotating it logs everyone out |
 | `LEDGERLINE_DATABASE_PATH` | `./data/ledgerline.db` | SQLite file (directory is created) |
+| `LEDGERLINE_DAILY_OUTFLOW_LIMIT_MINOR` | `100000000` (1,000,000.00) | per-account ceiling on withdrawals + outgoing transfers per UTC day; `0` disables |
+| `LEDGERLINE_MAX_REQUEST_BYTES` | `65536` | request body cap, enforced on the byte stream (chunked uploads included) |
+| `LEDGERLINE_CSP_FRAME_ANCESTORS` | `'none'` in prod, `*` in dev | set to `'self'` if you need to embed the dashboard yourself |
 | `LEDGERLINE_STATIC_DIR` | unset | serve the built SPA from this directory |
 | `LEDGERLINE_CORS_ORIGINS` | localhost origins | comma-separated allowlist; empty = no CORS middleware (same-origin only) |
 | `LEDGERLINE_TRUSTED_HOSTS` | empty | TrustedHost allowlist; also enables `X-Forwarded-For` |

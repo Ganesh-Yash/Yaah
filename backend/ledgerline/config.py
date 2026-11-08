@@ -67,6 +67,12 @@ class Settings:
     # Money rail limits. Amounts are integer minor units (cents/paise).
     max_amount_minor: int = 100_000_00  # 100,000.00 per single movement
     money_writes_per_minute: int = 30
+    # Total value that may *leave* one account in a UTC day (withdrawals plus
+    # outgoing transfers). 0 disables the check. This is a velocity limit, not a
+    # balance limit: it bounds the blast radius of a stolen session.
+    daily_outflow_limit_minor: int = 1_000_000_00  # 1,000,000.00 per account per day
+    # Hard ceiling on a request body, enforced while the bytes stream in.
+    max_request_bytes: int = 64 * 1024
 
     # Brute-force protection.
     login_max_failures: int = 5
@@ -84,6 +90,11 @@ class Settings:
     demo_seed_enabled: bool = False
 
     trusted_hosts: tuple[str, ...] = ()
+
+    # ``frame-ancestors`` source list for the CSP. ``None`` means "derive it":
+    # ``'none'`` in prod, ``*`` elsewhere (the hosted preview embeds the
+    # dashboard in an iframe, and ``'none'`` would break that demo).
+    csp_frame_ancestors: str | None = None
 
     extra: dict[str, str] = field(default_factory=dict)
 
@@ -110,6 +121,18 @@ class Settings:
     def is_prod(self) -> bool:
         return self.env == "prod"
 
+    @property
+    def frame_ancestors(self) -> str:
+        """Resolved CSP ``frame-ancestors`` value.
+
+        Production refuses to be framed unless an operator opts in explicitly;
+        development keeps the permissive value so the hosted preview (and any
+        other iframe embed) still renders.
+        """
+        if self.csp_frame_ancestors:
+            return self.csp_frame_ancestors
+        return "'none'" if self.is_prod else "*"
+
     @classmethod
     def from_env(cls) -> "Settings":
         settings = cls(
@@ -131,6 +154,10 @@ class Settings:
             ),
             max_amount_minor=_env_int("LEDGERLINE_MAX_AMOUNT_MINOR", 100_000_00),
             money_writes_per_minute=_env_int("LEDGERLINE_MONEY_WRITES_PER_MINUTE", 30),
+            daily_outflow_limit_minor=_env_int(
+                "LEDGERLINE_DAILY_OUTFLOW_LIMIT_MINOR", 1_000_000_00
+            ),
+            max_request_bytes=_env_int("LEDGERLINE_MAX_REQUEST_BYTES", 64 * 1024),
             login_max_failures=_env_int("LEDGERLINE_LOGIN_MAX_FAILURES", 5),
             login_max_failures_per_ip=_env_int("LEDGERLINE_LOGIN_MAX_FAILURES_PER_IP", 50),
             login_lockout_seconds=_env_int("LEDGERLINE_LOGIN_LOCKOUT_SECONDS", 15 * 60),
@@ -139,6 +166,7 @@ class Settings:
             static_dir=os.environ.get("LEDGERLINE_STATIC_DIR") or None,
             demo_seed_enabled=_env_bool("LEDGERLINE_DEMO_SEED", False),
             trusted_hosts=_env_list("LEDGERLINE_TRUSTED_HOSTS", ()),
+            csp_frame_ancestors=os.environ.get("LEDGERLINE_CSP_FRAME_ANCESTORS") or None,
         )
         if settings.is_dev_secret:
             print(

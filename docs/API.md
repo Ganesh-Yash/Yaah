@@ -42,13 +42,14 @@ client path fails loudly instead of returning HTML with a 200.
 | `FORBIDDEN` | 403 | wrong role |
 | `NOT_FOUND` | 404 | unknown **or not yours** — deliberately identical |
 | `INSUFFICIENT_FUNDS` | 409 | `details.available`, `details.requested` |
+| `DAILY_LIMIT_EXCEEDED` | 409 | `details.limit`, `details.used_today`, `details.remaining_today` |
 | `ACCOUNT_NOT_ACTIVE` | 409 | account frozen |
 | `DESTINATION_NOT_ACTIVE` | 409 | destination frozen |
 | `IDEMPOTENCY_KEY_REQUIRED` | 400 | header missing |
 | `IDEMPOTENCY_KEY_REUSED` | 409 | same key, different body |
 | `EMAIL_ALREADY_REGISTERED` | 409 | |
 | `RATE_LIMITED` | 429 | throttle or lockout |
-| `PAYLOAD_TOO_LARGE` | 413 | body > 64 KiB |
+| `PAYLOAD_TOO_LARGE` | 413 | body over `LEDGERLINE_MAX_REQUEST_BYTES` (default 64 KiB), counted as it streams — no `Content-Length` required |
 | `SERVICE_BUSY` | 503 | database write lock timeout; retry (same key) |
 
 ---
@@ -65,6 +66,7 @@ client path fails loudly instead of returning HTML with a 200.
 ```json
 {"name": "LedgerLine", "version": "1.0.0", "environment": "dev",
  "supported_currencies": ["USD","EUR","GBP","INR"], "max_amount": "100000.00",
+ "daily_outflow_limit": "1000000.00", "max_request_bytes": 65536,
  "idempotency_header": "Idempotency-Key", "roles": ["ADMIN","CUSTOMER","AUDITOR"]}
 ```
 

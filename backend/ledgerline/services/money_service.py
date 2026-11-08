@@ -28,7 +28,14 @@ from ..chain import canonical_json, sha256_hex
 from ..config import Settings
 from ..db import Database, utcnow_iso
 from ..errors import AppError, conflict, not_found, validation_error
-from ..ledger import Leg, get_account, get_account_by_number, post_transaction, system_account_id
+from ..ledger import (
+    Leg,
+    daily_outflow_minor,
+    get_account,
+    get_account_by_number,
+    post_transaction,
+    system_account_id,
+)
 from ..money import format_amount, parse_amount
 from .accounts_service import Principal, serialize_account
 
@@ -72,6 +79,59 @@ def _validate_amount(raw: object, settings: Settings) -> int:
             {"max_amount": format_amount(settings.max_amount_minor)},
         )
     return amount_minor
+
+
+def enforce_daily_limit(
+    conn: sqlite3.Connection,
+    settings: Settings,
+    account: sqlite3.Row,
+    amount_minor: int,
+) -> None:
+    """Refuse an outflow that would break the account's daily velocity limit.
+
+    Runs inside the caller's write transaction, under the same ``BEGIN
+    IMMEDIATE`` lock as the posting itself, so two concurrent withdrawals cannot
+    both squeeze under the limit by reading the same "used today" total.
+    """
+    limit = settings.daily_outflow_limit_minor
+    if limit <= 0 or account["is_system"]:
+        return
+    used = daily_outflow_minor(conn, account["id"])
+    if used + amount_minor <= limit:
+        return
+    raise AppError(
+        "DAILY_LIMIT_EXCEEDED",
+        "This movement would exceed the daily outflow limit for the account.",
+        status_code=409,
+        details={
+            "limit": format_amount(limit),
+            "used_today": format_amount(used),
+            "remaining_today": format_amount(max(limit - used, 0)),
+        },
+    )
+
+
+def audit_limit_denial(
+    db: Database,
+    principal: Principal,
+    exc: AppError,
+    *,
+    account_id: str,
+    amount_minor: int,
+    action: str,
+) -> None:
+    """Record a refused velocity-limit attempt after the write rolled back."""
+    if exc.code != "DAILY_LIMIT_EXCEEDED":
+        return
+    audit.record(
+        db,
+        action,
+        outcome="DENY",
+        actor=principal,
+        target_type="account",
+        target_id=account_id,
+        detail={"reason": "DAILY_LIMIT_EXCEEDED", "amount": format_amount(amount_minor)},
+    )
 
 
 def fingerprint(path: str, payload: dict[str, Any]) -> str:
@@ -253,6 +313,7 @@ def withdraw(
             raise not_found("Account")
         if account["status"] != "ACTIVE":
             raise conflict("ACCOUNT_NOT_ACTIVE", f"Account is {account['status'].lower()}.")
+        enforce_daily_limit(conn, settings, account, amount_minor)
         currency = account["currency"]
         transaction = post_transaction(
             conn,
@@ -273,21 +334,32 @@ def withdraw(
             "replayed": False,
         }
 
-    return execute_idempotent(
-        db,
-        principal=principal,
-        scope="POST /api/accounts/{account_id}/withdraw",
-        key=idempotency_key,
-        request_hash=fingerprint(
-            f"/api/accounts/{account_id}/withdraw",
-            {"amount": raw_amount, "description": note},
-        ),
-        action="WITHDRAWAL",
-        target_type="account",
-        target_id=account_id,
-        detail={"amount": format_amount(amount_minor)},
-        operation=operation,
-    )
+    try:
+        return execute_idempotent(
+            db,
+            principal=principal,
+            scope="POST /api/accounts/{account_id}/withdraw",
+            key=idempotency_key,
+            request_hash=fingerprint(
+                f"/api/accounts/{account_id}/withdraw",
+                {"amount": raw_amount, "description": note},
+            ),
+            action="WITHDRAWAL",
+            target_type="account",
+            target_id=account_id,
+            detail={"amount": format_amount(amount_minor)},
+            operation=operation,
+        )
+    except AppError as exc:
+        audit_limit_denial(
+            db,
+            principal,
+            exc,
+            account_id=account_id,
+            amount_minor=amount_minor,
+            action="WITHDRAWAL",
+        )
+        raise
 
 
 def transfer(
@@ -333,6 +405,8 @@ def transfer(
                 "The destination account cannot receive funds right now.",
             )
 
+        enforce_daily_limit(conn, settings, source, amount_minor)
+
         transaction = post_transaction(
             conn,
             tx_type="TRANSFER",
@@ -359,26 +433,37 @@ def transfer(
             "replayed": False,
         }
 
-    return execute_idempotent(
-        db,
-        principal=principal,
-        scope="POST /api/transfers",
-        key=idempotency_key,
-        request_hash=fingerprint(
-            "/api/transfers",
-            {
-                "from_account_id": from_account_id,
+    try:
+        return execute_idempotent(
+            db,
+            principal=principal,
+            scope="POST /api/transfers",
+            key=idempotency_key,
+            request_hash=fingerprint(
+                "/api/transfers",
+                {
+                    "from_account_id": from_account_id,
+                    "to_account_number": destination_number,
+                    "amount": raw_amount,
+                    "description": note,
+                },
+            ),
+            action="TRANSFER",
+            target_type="account",
+            target_id=from_account_id,
+            detail={
+                "amount": format_amount(amount_minor),
                 "to_account_number": destination_number,
-                "amount": raw_amount,
-                "description": note,
             },
-        ),
-        action="TRANSFER",
-        target_type="account",
-        target_id=from_account_id,
-        detail={
-            "amount": format_amount(amount_minor),
-            "to_account_number": destination_number,
-        },
-        operation=operation,
-    )
+            operation=operation,
+        )
+    except AppError as exc:
+        audit_limit_denial(
+            db,
+            principal,
+            exc,
+            account_id=from_account_id,
+            amount_minor=amount_minor,
+            action="TRANSFER",
+        )
+        raise
