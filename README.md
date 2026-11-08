@@ -372,4 +372,5 @@ Written down rather than glossed over:
 | [docs/API.md](docs/API.md) | endpoint reference with requests, responses and error codes |
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Docker, environment, TLS/proxy, backup and restore, key rotation |
 | [docs/DEMO.md](docs/DEMO.md) | five-minute demo script, including how to *show* idempotency and tamper detection |
+| [docs/SCRIPT.md](docs/SCRIPT.md) | second-by-second narration script and the 12-slide deck (`docs/LedgerLine-deck.pptx`) |
 | [docs/VERIFICATION.md](docs/VERIFICATION.md) | what was actually executed, where, with what output — and what was not verified |
