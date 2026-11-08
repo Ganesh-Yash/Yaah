@@ -6,6 +6,19 @@ provability — rather than describing them. Times are cumulative.
 **Setup:** `docker compose up --build` (or the two-terminal local setup), then open
 `http://localhost:8000`. Demo password for every seeded user: `LedgerLine!Demo2024`.
 
+For a clean recording, delete `data/ledgerline.db*` and re-run `python scripts/seed.py --demo` first;
+the seed prints the three account numbers in this order — **Alice Everyday, Alice Savings, Bob
+Everyday**. They are random on every seed, so read them from that line (or from the admin accounts
+table) rather than from this document.
+
+The numbers below assume a freshly seeded database:
+
+| Account | Opening balance | After 0:30 transfer | After 1:15 replay |
+|---|---|---|---|
+| Alice — Everyday (`1250.00`) | 1250.00 | **1149.50** | 1149.50 (unchanged) |
+| Alice — Savings | 500.00 | 500.00 | 500.00 |
+| Bob — Everyday (`300.00`) | 300.00 | **400.50** | 400.50 (unchanged) |
+
 ---
 
 ## 0:00 — Sign in as an account holder
@@ -64,10 +77,37 @@ curl -s -X POST $BASE/api/accounts/$A/deposit -H "Authorization: Bearer $T" \
 # {"error":{"code":"IDEMPOTENCY_KEY_REUSED", …}}   and the balance did not move
 ```
 
-## 2:00 — Concurrency: 20 withdrawals, 10 payments' worth of money
+## 2:00 — Concurrency: 20 withdrawals against 10 payments' worth of money
 
-This is the one that usually breaks in student projects. Start with a 100.00 balance and fire 20
-withdrawals of 10.00 at once:
+This is the one that usually breaks in student projects. The point needs a balance of exactly
+`100.00`, so first make an account for it (this also demonstrates the admin role):
+
+1. Sign out, **Register** a customer: `demo.race@ledgerline.test` / `RaceDemoPass!2024`.
+2. Sign in as `admin@ledgerline.test` → **Administration** → **Open account** for
+   `demo.race@ledgerline.test`, name `Payout Demo`, USD.
+3. Sign in as that customer and **Deposit** `100.00` (admins cannot move money — that is the point of
+   the next section).
+
+Then fire 20 withdrawals of `10.00` at once. From `backend\`:
+
+```bat
+..\.venv\Scripts\python.exe scripts\demo_race.py --email demo.race@ledgerline.test --password "RaceDemoPass!2024" --account "Payout Demo"
+```
+
+Expected, verbatim:
+
+```
+[race] account: Payout Demo (405445586367)
+[race] balance: 100.00   attempts: 20 x 10.00
+  HTTP 201 x10  moved
+  HTTP 409 x10  refused (insufficient funds)
+[race] final balance: 0.00
+```
+
+Half the payments succeed, the other half are refused, and the balance floors at exactly `0.00`
+instead of going negative — because the balance check and the balance write are one conditional
+`UPDATE` under `BEGIN IMMEDIATE`. (`scripts/demo_race.py` exists because `seq`, `jq` and `uuidgen`
+do not; the equivalent bash loop is below if you are on Linux or macOS.)
 
 ```bash
 A2=$(curl -s $BASE/api/accounts -H "Authorization: Bearer $T" | jq -r '.accounts[1].id')
@@ -81,8 +121,8 @@ wait
 # 10 × 409 Conflict        (INSUFFICIENT_FUNDS)
 ```
 
-The balance floors at exactly `0.00` and never goes negative. The formal version of this is
-`tests/test_concurrency.py`, which asserts the same thing on a real server.
+The formal version of this is `tests/test_concurrency.py`, which asserts the same thing on a real
+server, and `scripts/redteam.py`, which reports it in one line.
 
 ## 2:45 — Separation of duties
 
@@ -110,6 +150,12 @@ Now attack the database directly and re-run it:
 DB=/var/lib/ledgerline/ledgerline.db        # or ./data/ledgerline.db
 sqlite3 $DB "DROP TRIGGER trg_ledger_no_update;
              UPDATE ledger_entries SET amount_minor = 1 WHERE id = 1;"
+```
+
+No `sqlite3` binary (Windows ships without one)? Use the project's own interpreter from `backend\`:
+
+```bat
+..\.venv\Scripts\python.exe -c "import sqlite3;c=sqlite3.connect('data/ledgerline.db');c.executescript('DROP TRIGGER trg_ledger_no_update; UPDATE ledger_entries SET amount_minor=1 WHERE id=1;');c.commit()"
 ```
 
 Click **Re-run verification** → red, `ledger_hash_chain` fails with `first_bad_id: 1`, and

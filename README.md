@@ -304,6 +304,7 @@ backend/
     seed.py            system accounts + demo data
   scripts/seed.py      database initialiser
   scripts/redteam.py   attack suite against a running instance
+  scripts/demo_race.py concurrency demo: N withdrawals racing one balance (see docs/DEMO.md)
   tests/               167 tests
 frontend/
   src/api.ts           typed client, idempotency-aware, refresh handling
