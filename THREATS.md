@@ -8,7 +8,7 @@ Everything in the "Evidence" column is executable:
 
 ```bash
 cd backend
-pytest -q                                            # 153 tests
+pytest -q                                            # 155 tests
 python scripts/redteam.py --base-url http://localhost:8000   # 27 live checks
 ```
 

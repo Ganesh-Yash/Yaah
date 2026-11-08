@@ -5,11 +5,11 @@ origin, so there is no CORS surface and no second host to secure.
 
 ## Option 1 — Docker Compose
 
-> **Status:** the image definition and compose file are in the repository, but the build environment
-> used to develop this had no Docker daemon, so the image was **not** built here. Treat Option 2 as
-> the verified path; if you hit a build error in the multi-stage Dockerfile, it is an
-> untested-by-me step, not an application bug (the application itself has 153 tests and a 27-check
-> live attack suite behind it).
+> **Status:** this is the option CI verifies. The development machine had no Docker daemon, so I
+> never started the container myself, but the "Docker image builds" job runs
+> `docker build -t ledgerline:ci .` on every push and is green on `main` — the multi-stage build
+> itself is known-good, not assumed. Option 2 is the path exercised end to end here (seeded, served,
+> attacked) and is backed by 155 tests plus a 27-check live attack suite.
 
 ```bash
 cp .env.example .env

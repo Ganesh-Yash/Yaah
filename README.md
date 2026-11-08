@@ -2,6 +2,8 @@
 
 **Money movement with a ledger you can prove.**
 
+[![CI](https://github.com/Ganesh-Yash/Yaah/actions/workflows/ci.yml/badge.svg)](https://github.com/Ganesh-Yash/Yaah/actions/workflows/ci.yml)
+
 A small banking core: accounts, deposits, withdrawals and transfers that always balance, never pay
 twice, cannot be overdrawn by concurrent requests, and leave an append-only, hash-chained trail that
 an auditor can independently verify.
@@ -10,7 +12,7 @@ an auditor can independently verify.
 |---|---|
 | **Backend** | Python 3.11+ / FastAPI, SQLite (WAL) |
 | **Frontend** | React 18 + TypeScript + Vite |
-| **Tests** | 153 automated tests, including a live-server concurrency suite |
+| **Tests** | 155 automated tests, including a live-server concurrency suite |
 | **Attack suite** | 27/27 checks against a running instance (`scripts/redteam.py`) |
 | **Status** | Deployed and runnable end to end; see [known limitations](#known-limitations) |
 
@@ -74,7 +76,7 @@ Money movements are atomic, double-entry and idempotent:
 | 7 | Database transaction and concurrency protection | `db.py` (`BEGIN IMMEDIATE`), `ledger.py::apply_legs` | `tests/test_concurrency.py` (6 live-server scenarios) |
 | 8 | Append-only audit trail and transaction statements | `schema.sql` triggers, `audit.py`, `services/accounts_service.py::statement` | `tests/test_audit.py` (9), `tests/test_integrity_tamper.py` |
 | 9 | Account-level ownership and access-control checks | `fetch_authorized_account`, `require_customer` | `tests/test_rbac.py::TestAccountIsolation` |
-| 10 | Automated security, concurrency and transaction tests | `backend/tests/*`, `scripts/redteam.py` | 153 tests + 27 attack checks |
+| 10 | Automated security, concurrency and transaction tests | `backend/tests/*`, `scripts/redteam.py` | 155 tests + 27 attack checks |
 
 The React dashboard, deployment files, seed data and API documentation are in place as well; the
 demo video is the one deliverable I could not record here (see [known limitations](#known-limitations)).
@@ -89,11 +91,11 @@ docker compose up --build
 # open http://localhost:8000  (API + dashboard on the same origin)
 ```
 
-> **Honest caveat:** the `Dockerfile` and `docker-compose.yml` are written and reviewed, but the
-> environment this was built in had no Docker daemon, so the image has **not** been built here. The
-> bare-metal path below is the one that was exercised end to end (seeded, served, attacked). If the
-> Docker build fails on your machine, that is a bug I could not catch — the failure will be in the
-> two-stage build, not in the application, which is covered by 153 tests.
+> **Honest caveat:** the machine I developed on has no Docker daemon, so I never ran this container
+> myself. The image *is* built on every push by CI (`docker build -t ledgerline:ci .`, job "Docker
+> image builds"), which is green on `main`, so the Dockerfile in this repository is known to build —
+> but "builds" is not "ran here". Option B is the path I exercised end to end: seeded, served and
+> attacked against a live process, behind 155 automated tests.
 
 ### Option B — local development (two terminals)
 
@@ -112,14 +114,15 @@ npm install
 npm run dev                                                  # http://localhost:5173, proxies /api
 ```
 
-Android/Linux/macOS all work the same way; on Windows use `set` instead of `export` in CMD.
+Linux and macOS work the same way; on Windows use `set` instead of `export` in CMD (or
+`$env:` in PowerShell).
 
 ### Tests and the attack suite
 
 ```bash
 cd backend
 pip install -r requirements-dev.txt
-pytest -q                                  # 153 tests
+pytest -q                                  # 155 tests
 uvicorn ledgerline.main:app --port 8000 &  # then, against a running instance:
 python scripts/redteam.py --base-url http://localhost:8000
 ```
@@ -255,7 +258,7 @@ Full request/response examples are in [docs/API.md](docs/API.md); the running se
 
 | Evidence | Where |
 |---|---|
-| 153 automated tests (unit, integration, live-server concurrency) | `backend/tests/` |
+| 155 automated tests (unit, integration, live-server concurrency) | `backend/tests/` |
 | 27-check attack run against a live instance | `backend/scripts/redteam.py` |
 | Concurrency: 20 racing withdrawals, 30 racing deposits, 20 duplicate keys, 40 opposite transfers | `backend/tests/test_concurrency.py` |
 | Tamper detection: triggers dropped, history edited, verifier catches it | `backend/tests/test_integrity_tamper.py` |
@@ -282,7 +285,7 @@ backend/
     seed.py            system accounts + demo data
   scripts/seed.py      database initialiser
   scripts/redteam.py   attack suite against a running instance
-  tests/               153 tests
+  tests/               155 tests
 frontend/
   src/api.ts           typed client, idempotency-aware, refresh handling
   src/views/           auth, accounts, administration, audit
@@ -347,3 +350,4 @@ Written down rather than glossed over:
 | [docs/API.md](docs/API.md) | endpoint reference with requests, responses and error codes |
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Docker, environment, TLS/proxy, backup and restore, key rotation |
 | [docs/DEMO.md](docs/DEMO.md) | five-minute demo script, including how to *show* idempotency and tamper detection |
+| [docs/VERIFICATION.md](docs/VERIFICATION.md) | what was actually executed, where, with what output — and what was not verified |
