@@ -132,14 +132,19 @@ Three Render behaviours would break this image if nothing was done about them, s
 | Not every plan has a pre-deploy command | the entrypoint runs `python -m scripts.migrate` before uvicorn, under `set -eu`, so a failed migration aborts the boot instead of serving against a missing schema |
 | The only stable hostname is `RENDER_EXTERNAL_HOSTNAME` | it is used as the default `LEDGERLINE_TRUSTED_HOSTS`, which also enables reading `X-Forwarded-For` for the per-IP login throttle |
 
-**Plans.** The blueprint does not use `free`, deliberately:
+**Cost.** The blueprint is the zero-cost configuration — Render `free` + Neon `free` + Upstash `free`,
+no card needed on any of the three. Three consequences follow, and they are stated here rather than
+discovered during a demo:
 
-- **Web service** — a free instance spins down after 15 minutes idle and the next request waits ~30 s.
-  `starter` (~$7/month) is always on. A sleeping service *is* the "the link does nothing" failure.
-- **Postgres** — free Render Postgres **expires after 30 days**. The blueprint expects an external URL
-  instead: Neon `aws-ap-southeast-1`, the same region as the service, with `?sslmode=require`. Render's
-  own `basic-256mb` plan also works if you would rather keep one dashboard; it does not expire.
-- **Redis** — Upstash `ap-southeast-1`, `rediss://` (TLS, not `redis://`).
+- **Cold start.** A free web service spins down after 15 minutes without traffic, and the next request
+  spends about a minute waking it (Render shows its own loading page meanwhile). Open the URL once before
+  a demo, or switch the service to `starter` (~$7/month) in the dashboard and the sleep disappears. The
+  750 instance-hours per month only run out if something keeps the service permanently awake.
+- **No Shell and no one-off jobs.** So `bootstrap_admin` cannot be run from inside Render. There are two
+  ways in; both are below.
+- **No free Render Postgres.** It expires 30 days after creation and is deleted 14 days later, taking the
+  ledger with it. Use **Neon** `free` (`aws-ap-southeast-1`, same region, `?sslmode=require`) for
+  PostgreSQL and **Upstash** `free` (`ap-southeast-1`, `rediss://`) for Redis. Neither expires.
 
 ```bash
 # 1. Neon (console.neon.tech): project in AWS ap-southeast-1. Copy the DIRECT
@@ -149,19 +154,40 @@ Three Render behaviours would break this image if nothing was done about them, s
 #      branch:  the branch you want live — Render deploys git, not a working dir
 #      region:  singapore
 #    Enter LEDGERLINE_DATABASE_URL and LEDGERLINE_REDIS_URL when prompted.
-# 4. First admin. Render's Shell tab is available on paid instances:
-python -m scripts.bootstrap_admin --email you@example.com --print-token
 ```
 
 Then open `https://<name>.onrender.com/api/health`: `backend: postgres` and
 `checks.schema.version: "2"` mean the release step did its job.
 
-**Neon free plan and the health check.** A free Neon database suspends after ~5 idle minutes, and the
-monthly allowance is 100 compute-hours. `healthCheckPath: /api/ready` queries the database, so it keeps
-Neon awake around the clock: 0.25 CU × 730 h ≈ 182 CU-h, which exhausts the allowance near day 16 and
-suspends the database mid-judging. On Neon **free**, point the health check at `/api/health` (liveness)
-so Postgres is allowed to idle; the first request after a quiet spell then costs about a second. On
-Neon **Launch**, keep `/api/ready`.
+### First admin when there is no Shell
+
+`bootstrap_admin` is a script, not an endpoint (decision D14), and a free instance offers nowhere to run
+it. Two options — the first leaves no known credentials behind:
+
+**From your own machine**, after the first successful deploy (that is what creates the schema):
+
+```bash
+cd backend
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+LEDGERLINE_DATABASE_URL="postgresql://...neon.tech/balancevault?sslmode=require" \
+  .venv/bin/python -m scripts.bootstrap_admin --email you@example.com --print-token
+```
+
+It prints a one-time password; the script refuses to run again once an admin exists, and the creation is
+written into the audit chain as a `SYSTEM` event.
+
+**Or seed the documented demo users**: set `LEDGERLINE_DEMO_SEED=1`, redeploy, log in as
+`admin@ledgerline.test` / `LedgerLine!Demo2024`, change that password from the dashboard, then set the
+variable back to `0` and redeploy. Those credentials are in this repository, so an instance left in that
+state has a published admin account — it is a way to get in, not a way to stay.
+
+**Neon free and the health check.** A free Neon database suspends after ~5 idle minutes, and the monthly
+allowance is 100 compute-hours. On a free Render service nothing polls it while the service sleeps, so
+`healthCheckPath: /api/ready` is safe here: the database idles exactly when the site does, and the
+allowance is never threatened. This becomes a trap only if you add something that keeps the site warm —
+an uptime monitor or a keep-alive cron. At 0.25 CU for 730 hours that is ≈182 CU-h, so Neon would hit its
+cap near day 16 and suspend the database mid-judging. If you do add one, point the health check at
+`/api/health` (liveness, no query) or move the database to Neon Launch.
 
 Platform difference worth knowing: `fly deploy` ships your working tree, while Render deploys whatever
 is on the selected branch. Pick the branch in the dashboard, or merge first.

@@ -131,9 +131,10 @@ curl -s localhost:8000/api/health | python -m json.tool
 # open http://localhost:8000  → dashboard, /docs → OpenAPI, /api/ready → readiness
 ```
 
-To put this on a public host, `render.yaml` (Render) and `fly.toml.example` (Fly) both describe one
-always-on Docker service; the container migrates the database on boot and serves the SPA itself. Steps
-for either: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+To put this on a public host, `render.yaml` (Render, free plan) and `fly.toml.example` (Fly, always-on)
+both describe a single Docker service; the container migrates the database on boot and serves the SPA
+itself, so there is nothing else to run. Steps for either, including the free-tier caveats:
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 The stack starts in dependency order — `db` → `migrate` (Prisma) → `grants` (the two database roles)
 → `api` — and the API runs as `balancevault_app`, a role that cannot rewrite the ledger.
