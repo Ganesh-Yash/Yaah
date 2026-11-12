@@ -13,7 +13,7 @@ Two shapes, same API:
 > environment has no Docker daemon. Every component was exercised individually instead: the Prisma
 > migration applied to PostgreSQL 16.2, the role/privilege files applied and attacked
 > (`backend/tests/test_db_roles.py`, 13 tests), the full API test suite against that server
-> (223 tests), and the Redis limiter against a real Redis (`backend/tests/test_redis_limiter.py`, 11
+> (232 tests), and the Redis limiter against a real Redis (`backend/tests/test_redis_limiter.py`, 11
 > tests). The YAML is the only unexecuted part.
 
 ```bash
@@ -94,7 +94,8 @@ cd backend && python -m scripts.migrate          # or: make migrate
 | Platform | Where the command goes |
 |---|---|
 | Fly.io | `[deploy] release_command = "python -m scripts.migrate"` (see `fly.toml.example`) |
-| Railway / Render | a pre-deploy / release command in the service settings |
+| Render | nothing to configure: `scripts/start.sh` migrates on boot. A paid instance may use
+`preDeployCommand` instead, with `LEDGERLINE_SKIP_STARTUP_MIGRATION=1` |
 | Docker Compose | the `migrate` service already does this (`prisma migrate deploy`) |
 
 Behaviour, and why it is safe to run on every deploy:
@@ -116,6 +117,54 @@ the same URL.
 
 The runtime image ships `prisma/migrations` for exactly this reason (`COPY prisma/ ./prisma/` in the
 root `Dockerfile`), because `pg.py` resolves the directory at `/app/prisma/migrations`.
+
+## Deploying on Render
+
+`render.yaml` in the repository root is a Blueprint: **New + → Blueprint → pick this repository → Apply**.
+It declares one Docker web service — the API serves the built SPA itself, so there is no second service
+and no CORS surface.
+
+Three Render behaviours would break this image if nothing was done about them, so the repo handles them:
+
+| Render behaviour | What the repo does |
+|---|---|
+| The port is assigned dynamically in `$PORT` | `scripts/start.sh` runs uvicorn on `${PORT:-8000}`, and the Dockerfile health check reads the same variable. A hardcoded 8000 gives a 502 from the load balancer while the process log looks healthy |
+| Not every plan has a pre-deploy command | the entrypoint runs `python -m scripts.migrate` before uvicorn, under `set -eu`, so a failed migration aborts the boot instead of serving against a missing schema |
+| The only stable hostname is `RENDER_EXTERNAL_HOSTNAME` | it is used as the default `LEDGERLINE_TRUSTED_HOSTS`, which also enables reading `X-Forwarded-For` for the per-IP login throttle |
+
+**Plans.** The blueprint does not use `free`, deliberately:
+
+- **Web service** — a free instance spins down after 15 minutes idle and the next request waits ~30 s.
+  `starter` (~$7/month) is always on. A sleeping service *is* the "the link does nothing" failure.
+- **Postgres** — free Render Postgres **expires after 30 days**. The blueprint expects an external URL
+  instead: Neon `aws-ap-southeast-1`, the same region as the service, with `?sslmode=require`. Render's
+  own `basic-256mb` plan also works if you would rather keep one dashboard; it does not expire.
+- **Redis** — Upstash `ap-southeast-1`, `rediss://` (TLS, not `redis://`).
+
+```bash
+# 1. Neon (console.neon.tech): project in AWS ap-southeast-1. Copy the DIRECT
+#    connection string (not the -pooler host) and append ?sslmode=require
+# 2. Upstash (console.upstash.com): Redis in ap-southeast-1, TLS on; copy rediss://
+# 3. Render: New + → Blueprint → this repository
+#      branch:  the branch you want live — Render deploys git, not a working dir
+#      region:  singapore
+#    Enter LEDGERLINE_DATABASE_URL and LEDGERLINE_REDIS_URL when prompted.
+# 4. First admin. Render's Shell tab is available on paid instances:
+python -m scripts.bootstrap_admin --email you@example.com --print-token
+```
+
+Then open `https://<name>.onrender.com/api/health`: `backend: postgres` and
+`checks.schema.version: "2"` mean the release step did its job.
+
+**Neon free plan and the health check.** A free Neon database suspends after ~5 idle minutes, and the
+monthly allowance is 100 compute-hours. `healthCheckPath: /api/ready` queries the database, so it keeps
+Neon awake around the clock: 0.25 CU × 730 h ≈ 182 CU-h, which exhausts the allowance near day 16 and
+suspends the database mid-judging. On Neon **free**, point the health check at `/api/health` (liveness)
+so Postgres is allowed to idle; the first request after a quiet spell then costs about a second. On
+Neon **Launch**, keep `/api/ready`.
+
+Platform difference worth knowing: `fly deploy` ships your working tree, while Render deploys whatever
+is on the selected branch. Pick the branch in the dashboard, or merge first.
 
 ## Database roles
 
@@ -381,5 +430,5 @@ why timestamps are stored as `TEXT` rather than `timestamptz`.
 Rollout advice: run the full suite against the target server before switching —
 
 ```bash
-LEDGERLINE_TEST_DATABASE_URL="$APP_URL" pytest -q     # 223 passed
+LEDGERLINE_TEST_DATABASE_URL="$APP_URL" pytest -q     # 232 passed
 ```

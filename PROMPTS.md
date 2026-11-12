@@ -11,7 +11,7 @@ engineering judgement was mine:
   each one is enforced: code, transaction, or database constraint.
 - Every row in the decision log below is a proposal I did **not** accept; what I did accept is
   listed separately, under "What I kept from it".
-- I found **30 specific defects** in generated code. Each row records how I found it and what I
+- I found **32 specific defects** in generated code. Each row records how I found it and what I
   changed, because "the AI wrote it" is not an excuse a judge would accept.
 - Every claim in the README is traced to a test or a script in this repository, and every gap is
   written down in "Known limitations".
@@ -39,7 +39,7 @@ Two phases:
 | Where the lock is taken and why | decided | proposed middleware-level checks | D7, `tests/test_concurrency.py` |
 | First draft of most modules | reviewed and corrected all of it | wrote it | commit history; defect tables below |
 | Adversarial tests (concurrency, tamper, idempotency) | specified them and demanded them first | wrote the first versions | `tests/test_concurrency.py`, `test_integrity_tamper.py`, `test_idempotency.py` |
-| Finding defects in generated code | found 30 | produced them | the two tables below |
+| Finding defects in generated code | found 32 | produced them | the two tables below |
 | Deciding what **not** to claim in the docs | decided | kept proposing confident prose | `README.md` → "Known limitations" |
 | Database roles, bootstrap, health checks | specified the threat model | implemented | `deploy/postgres/`, `tests/test_db_roles.py` |
 
@@ -64,6 +64,7 @@ Two phases:
 | D12 | **Serialise Postgres writers with an advisory lock** | Use Postgres defaults and rely on the conditional `UPDATE` | The conditional `UPDATE` protects the balance, but the daily-limit check reads a sum and then posts. With parallel writers that is a TOCTOU race the SQLite version never had. Keeping one writer keeps one money code path and lets the same six concurrency tests cover both engines. Cost: writes do not scale horizontally — stated in the README limitations. |
 | D13 | **The Redis limiter fails open** | Fail closed: reject writes when Redis is down | Every money invariant lives in the database, so a cache outage should not stop the bank. Fail-closed turns a limiter outage into an outage, which is the worse failure for this product. The choice is in THREATS.md §8 and visible in `/api/health`, so it is a documented decision rather than a hidden one. |
 | D14 | **Bootstrap is a script, not an endpoint** | An unauthenticated `POST /api/admin/bootstrap` that works when no admin exists | That endpoint is a permanent backdoor: it must exist forever, and its guard ("only when zero admins") is one race away from being wrong. A script needs database credentials, creates the role it is told to (ADMIN, hard-coded), refuses to run twice, and writes an audited event. |
+| D15 | **One image, two deployment targets: a shared entrypoint instead of a Fly-only release hook** | Keep the migration wired to Fly's `release_command` and copy the same idea into Render's dashboard settings | The first cut assumed Fly: the migration ran in `release_command`, and the port was hardcoded to 8000 in both the CMD and the health check. Render assigns `$PORT` at runtime and only offers a pre-deploy command on some plans, so that design was either a 502 or an unmigrated database — see G32 and G33. Moving the migration into `scripts/start.sh` and reading `${PORT:-8000}` makes the image deployable on both without forking it; Fly keeps its release hook as an extra pre-traffic gate, and can skip the duplicate with `LEDGERLINE_SKIP_STARTUP_MIGRATION=1`. |
 
 ---
 
@@ -163,6 +164,8 @@ implementation. Most of the defects below were found that way.
 | G29 | `rate_limited()` returning a bare `429` | No `Retry-After`, and `AppError` had no way to carry response headers at all — so a throttled client could only guess how long to wait, which usually means retrying immediately | Hit the live limit with 120 bad logins and read the response headers, rather than reading the code | Added a `headers` field to `AppError`, forwarded it from the exception handler, and set `Retry-After: 60` on the money throttle and the login throttle; two tests pin it |
 | G30 | The first version of `scripts/migrate.py` | With no `LEDGERLINE_DATABASE_URL` it fell through to the default SQLite path, so a release step in a container would have "succeeded" by creating a throwaway file that the next deploy discards | Its own test: `test_refuses_when_there_is_no_target` returned 0 instead of 1 | A production release now refuses without an explicit database URL; the test asserts exit 1 and a message that names the variable |
 | G31 | `PostgresDatabase.schema_version()` | It raised `UndefinedTable` on an empty database — exactly the state a release step exists to fix — while the SQLite adapter returned `None` for the same situation | Running `python -m scripts.migrate` against a genuinely empty database, not against the test fixtures | Missing relation now reads as "no version yet" on both engines, and `/api/ready` can answer before the first migration |
+| G32 | The container's listening port | The Dockerfile hardcoded `--port 8000`, and so did the image health check. On Render the platform assigns the port in `$PORT`, so the process would have looked healthy in the logs while the load balancer answered **502** | Reading Render's port documentation before writing the blueprint, then noticing the number was also baked into `HEALTHCHECK` | `scripts/start.sh` binds `${PORT:-8000}` (Fly's `internal_port` still works through the fallback), the health check reads the same variable, and `tests/test_deploy_config.py` fails if a bare `--port 8000` ever returns |
+| G33 | Where the migration runs on a platform without a release hook | The release step was wired only to Fly's `release_command`. Render offers a pre-deploy command only on some plans, so a deploy there would have started the API against a database with no schema — the app would answer `/api/health` with 200 and 500 on every real route | Walking the Render deploy path start to finish instead of assuming the Fly design generalised | The entrypoint now runs `python -m scripts.migrate` before uvicorn under `set -eu` (a failed migration aborts the boot), with `LEDGERLINE_SKIP_STARTUP_MIGRATION=1` for platforms that run it as a separate pre-traffic step. Verified by booting the entrypoint on an arbitrary port against an empty database |
 
 > The numbering skips **G21**: that defect belongs to a change that is not in this commit
 > history. I kept the numbers stable instead of renumbering, because other documents refer to them.
@@ -215,9 +218,9 @@ that decides whether those characters are correct:
 |---|---|
 | The invariants, and the enforcement point chosen for each | `THREATS.md` §2; every invariant has a test that fails if it is removed |
 | Every decision in the log above is a rejection of a proposal — the accepted ones are listed separately | the "what the AI proposed" column |
-| 30 defects found by reading, reasoning and running — not by trusting | the two defect tables, each with "how it surfaced" |
+| 32 defects found by reading, reasoning and running — not by trusting | the two defect tables, each with "how it surfaced" |
 | The adversarial cases that make the guarantees meaningful | `test_concurrency.py`, `test_integrity_tamper.py`, `test_idempotency.py`, `scripts/redteam.py` |
-| The decision to document gaps instead of hiding them | `README.md` → "Known limitations" (11 items), `docs/VERIFICATION.md` §8 |
+| The decision to document gaps instead of hiding them | `README.md` → "Known limitations" (11 items), `docs/VERIFICATION.md` §9 |
 
 The bar I held myself to: **I can explain any line in the money path, and I can break the system on
 purpose and show you the test that catches it.** That is what "built with AI" means here. The tool
