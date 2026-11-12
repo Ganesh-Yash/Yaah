@@ -13,7 +13,7 @@ Two shapes, same API:
 > environment has no Docker daemon. Every component was exercised individually instead: the Prisma
 > migration applied to PostgreSQL 16.2, the role/privilege files applied and attacked
 > (`backend/tests/test_db_roles.py`, 13 tests), the full API test suite against that server
-> (235 tests), and the Redis limiter against a real Redis (`backend/tests/test_redis_limiter.py`, 11
+> (236 tests), and the Redis limiter against a real Redis (`backend/tests/test_redis_limiter.py`, 11
 > tests). The YAML is the only unexecuted part.
 
 ```bash
@@ -149,8 +149,8 @@ discovered during a demo:
   spends about a minute waking it (Render shows its own loading page meanwhile). Open the URL once before
   a demo, or switch the service to `starter` (~$7/month) in the dashboard and the sleep disappears. The
   750 instance-hours per month only run out if something keeps the service permanently awake.
-- **No Shell and no one-off jobs.** So `bootstrap_admin` cannot be run from inside Render. There are two
-  ways in; both are below.
+- **No Shell and no one-off jobs.** So `bootstrap_admin` cannot be run from inside Render — it runs from
+  your machine or from a GitHub Actions job instead. Both are below.
 - **No free Render Postgres.** It expires 30 days after creation and is deleted 14 days later, taking the
   ledger with it. Use **Neon** `free` (`aws-ap-southeast-1`, same region, `?sslmode=require`) for
   PostgreSQL and **Upstash** `free` (`ap-southeast-1`, `rediss://`) for Redis. Neither expires.
@@ -185,20 +185,32 @@ LEDGERLINE_DATABASE_URL="postgresql://...neon.tech/balancevault?sslmode=require"
 It prints a one-time password; the script refuses to run again once an admin exists, and the creation is
 written into the audit chain as a `SYSTEM` event.
 
-**Or seed the documented demo users**: set `LEDGERLINE_DEMO_SEED=1`, redeploy, log in as
-`admin@ledgerline.test` / `LedgerLine!Demo2024`, change that password from the dashboard, then set the
-variable back to `0` and redeploy. Those credentials are in this repository, so an instance left in that
-state has a published admin account — it is a way to get in, not a way to stay.
+**Without Python on your machine — a one-off GitHub Actions job.** `.github/workflows/create-admin.yml`
+exists for exactly this case:
+
+1. GitHub → this repository → **Settings → Secrets and variables → Actions → New repository secret**, twice:
+   `LEDGERLINE_DATABASE_URL` (same value as the service) and `LEDGERLINE_BOOTSTRAP_PASSWORD` (the password
+   you want this admin to have).
+2. **Actions → Create admin → Run workflow**, type your email, run it.
+3. Read the job log: `Created admin you@example.com (...) on postgres`. The password is never printed —
+   this repository is public, so run logs are too, which is why it comes from a secret instead.
+
+> **`LEDGERLINE_DEMO_SEED` cannot be used here.** It is a real setting, but `seed_demo()` raises outright
+> when `LEDGERLINE_ENV=prod` — deliberately, since the demo accounts have a password published in this
+> repository, and there is no variable that turns the guard off. A deploy that sets it crash-loops with
+> `RuntimeError: refusing to create demo accounts when LEDGERLINE_ENV=production`. (This documentation
+> claimed otherwise for a while; see PROMPTS.md G36.)
 
 ### First-deploy failures, and what they actually mean
 
-All three of these happened on the first real Render deploy of this repository:
+All four of these happened on the first real Render deploys of this repository:
 
 | Log line | Cause | Fix |
 |---|---|---|
 | `LEDGERLINE_JWT_SECRET must be set to at least 32 characters in prod` | the service was created by hand instead of from `render.yaml`, so nothing generated the secret | add `LEDGERLINE_JWT_SECRET` yourself, 32+ characters |
 | `ValueError: Redis URL must specify one of the following schemes (redis://, rediss://, unix://)` | the value was pasted **with its surrounding quotes** (`"rediss://..."`), so the scheme read `"rediss` | quotes and stray whitespace are now stripped on load, and a URL that still does not parse degrades the limiter instead of stopping the app (G34) |
 | Deploy log has no `[migrate]` line and no `COPY prisma/ ./prisma/` step | the build came from a branch without the release step — `main` | set the service's branch to the one carrying this work, then redeploy |
+| `RuntimeError: refusing to create demo accounts when LEDGERLINE_ENV=production` | `LEDGERLINE_DEMO_SEED` was set on a prod deployment, where seeding is refused by design | remove the variable; create the first admin with `bootstrap_admin` or the **Create admin** workflow |
 
 The third one is worth recognising instantly: once the container starts through
 `scripts/start.sh`, `[migrate] target: ...` is the *first* thing in the log. If the log
@@ -479,5 +491,5 @@ why timestamps are stored as `TEXT` rather than `timestamptz`.
 Rollout advice: run the full suite against the target server before switching —
 
 ```bash
-LEDGERLINE_TEST_DATABASE_URL="$APP_URL" pytest -q     # 235 passed
+LEDGERLINE_TEST_DATABASE_URL="$APP_URL" pytest -q     # 236 passed
 ```

@@ -56,13 +56,11 @@ services:
       # Upstash (same region), rediss:// — TLS, not redis://.
       - key: LEDGERLINE_REDIS_URL
         sync: false
-      # Free instances have no Shell tab, so there is no `bootstrap_admin` to run.
-      # Set this to 1 to seed the documented demo users on first boot (an ADMIN
-      # among them), then change that password from the dashboard and set this
-      # back to 0. Left off, the cleanest path is to run the bootstrap script from
-      # your own machine against the Neon URL — see docs/DEPLOYMENT.md.
-      # - key: LEDGERLINE_DEMO_SEED
-      #   value: "1"
+      # Do NOT set LEDGERLINE_DEMO_SEED here. It is a real setting, but seed_demo()
+      # refuses outright when LEDGERLINE_ENV=prod (the demo password is published
+      # in this repository), and the service would crash-loop. Create the first
+      # admin with scripts/bootstrap_admin.py — from your machine, or from the
+      # "Create admin" workflow in .github/workflows/. See docs/DEPLOYMENT.md.
       #
       # Optional: the migrator credential, if the API role has no DDL rights.
       # - key: LEDGERLINE_MIGRATION_DATABASE_URL

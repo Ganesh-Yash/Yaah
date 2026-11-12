@@ -118,3 +118,14 @@ def test_no_platform_hostname_means_no_allowlist(monkeypatch):
     monkeypatch.delenv("RENDER_EXTERNAL_HOSTNAME", raising=False)
 
     assert Settings.from_env().trusted_hosts == ()
+
+def test_blueprint_does_not_enable_demo_seeding(blueprint):
+    """seed_demo() refuses in prod, so enabling it here crash-loops the service.
+
+    The demo password is published in this repository; the guard is the only thing
+    standing between a fork and a public admin account, so it stays a guard — the
+    blueprint must not suggest a variable that turns the deploy into a boot loop.
+    """
+    env = {item["key"] for item in blueprint["services"][0]["envVars"]}
+    assert "LEDGERLINE_DEMO_SEED" not in env
+
