@@ -179,3 +179,41 @@ def test_limit_refusal_is_not_cached_as_an_idempotent_success(limited):
     retried = api.withdraw(customer, account["id"], "40.00", key=key)
     assert retried.status_code == 201, retried.text
     assert api.balance(customer, account["id"]) == "400.00"
+
+
+class TestRateLimitResponsesAreActionable:
+    """A 429 must say when to come back.
+
+    RFC 6585 defines Retry-After for 429. Without it a client can only guess, and
+    guessing usually means retrying immediately — which is how a throttle turns
+    into a retry storm.
+    """
+
+    def test_money_throttle_sets_retry_after(self, api, alice, admin):
+        account = api.open_account(admin, "alice@example.com")
+        api.deposit(alice, account["id"], "10.00")
+        limited = None
+        for _ in range(api.settings.money_writes_per_minute + 2):
+            response = api.client.post(
+                f"/api/accounts/{account['id']}/deposit",
+                json={"amount": "0.01"},
+                headers={**alice, "Idempotency-Key": str(uuid.uuid4())},
+            )
+            if response.status_code == 429:
+                limited = response
+                break
+        assert limited is not None, "the money throttle never triggered"
+        assert limited.json()["error"]["code"] == "RATE_LIMITED"
+        assert limited.headers.get("Retry-After") == "60"
+
+    def test_login_throttle_sets_retry_after(self, api):
+        response = None
+        for _ in range(120):
+            response = api.client.post(
+                "/api/auth/login",
+                json={"email": "spray@example.com", "password": "wrong-password-1"},
+            )
+            if response.status_code == 429:
+                break
+        assert response is not None and response.status_code == 429, "the login throttle never triggered"
+        assert response.headers.get("Retry-After") == "60"
