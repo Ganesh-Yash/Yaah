@@ -21,7 +21,7 @@ an auditor can independently verify.
 | **Schema** | Prisma owns the PostgreSQL DDL and migrations; the API is Python |
 | **Cache** | Redis, for rate limits shared across workers (in-process fallback) |
 | **Frontend** | React 18 + TypeScript + Vite |
-| **Tests** | 232 tests: all pass on PostgreSQL 16, 217 pass + 15 skip on SQLite |
+| **Tests** | 235 tests: all pass on PostgreSQL 16, 220 pass + 15 skip on SQLite |
 | **Attack suite** | 27/27 checks against a running instance (`scripts/redteam.py`) |
 | **Status** | Deployed and runnable end to end; see [known limitations](#known-limitations) |
 
@@ -87,7 +87,7 @@ Money movements are atomic, double-entry and idempotent:
 | 7 | Database transaction and concurrency protection | `db.py` (`BEGIN IMMEDIATE`), `ledger.py::apply_legs` | `tests/test_concurrency.py` (6 live-server scenarios) |
 | 8 | Append-only audit trail and transaction statements | `schema.sql` triggers, `audit.py`, `services/accounts_service.py::statement` | `tests/test_audit.py` (9), `tests/test_integrity_tamper.py` |
 | 9 | Account-level ownership and access-control checks | `fetch_authorized_account`, `require_customer` | `tests/test_rbac.py::TestAccountIsolation` |
-| 10 | Automated security, concurrency and transaction tests | `backend/tests/*`, `scripts/redteam.py` | 232 tests + 27 attack checks |
+| 10 | Automated security, concurrency and transaction tests | `backend/tests/*`, `scripts/redteam.py` | 235 tests + 27 attack checks |
 
 The React dashboard, deployment files, seed data and API documentation are in place as well; the
 demo video is the one deliverable I could not record here (see [known limitations](#known-limitations)).
@@ -100,7 +100,7 @@ Added by a later clarification (BalanceVault rename). Each one is implemented, n
 |---|---|---|---|
 | 11 | Account management and user onboarding | `routers/auth.py` (register), `routers/admin.py` (open account, freeze, staff users, unlock), `routers/accounts.py` | `tests/test_auth.py`, `tests/test_rbac.py`, `tests/test_money.py` |
 | 12 | Role-based access control (ADMIN / CUSTOMER / AUDITOR) | `deps.py` (`ADMIN_ONLY`, `AUDITOR_OR_ADMIN`, `require_customer`), one dependency per route | `tests/test_rbac.py` (16) |
-| 13 | PostgreSQL, with Prisma | `ledgerline/pg.py`, `prisma/schema.prisma`, `prisma/migrations/` | the **entire** suite on a real server: `LEDGERLINE_TEST_DATABASE_URL=... pytest -q` → 232 passed |
+| 13 | PostgreSQL, with Prisma | `ledgerline/pg.py`, `prisma/schema.prisma`, `prisma/migrations/` | the **entire** suite on a real server: `LEDGERLINE_TEST_DATABASE_URL=... pytest -q` → 235 passed |
 | 14 | Redis rate limiting | `ledgerline/limiter.py::RedisSlidingWindowLimiter` (one Lua script per check) | `tests/test_redis_limiter.py` (11) against a real Redis |
 | 15 | First-admin bootstrap script | `scripts/bootstrap_admin.py` | `tests/test_bootstrap.py` (14) |
 | 16 | Database roles and deployment health checks | `deploy/postgres/*.sql` (two roles), `/api/health`, `/api/ready` | `tests/test_db_roles.py` (13), `tests/test_redis_limiter.py` (11) |
@@ -189,12 +189,12 @@ Linux and macOS work the same way; on Windows use `set` instead of `export` in C
 ```bash
 cd backend
 pip install -r requirements-dev.txt
-pytest -q                                  # SQLite: 217 passed, 15 skipped
+pytest -q                                  # SQLite: 220 passed, 15 skipped
 
 # the same suite against a real PostgreSQL server (needs one running)
 pip install -r requirements-postgres.txt
 export LEDGERLINE_TEST_DATABASE_URL=postgresql://postgres:dev@127.0.0.1:5432/postgres
-pytest -q                                  # 232 passed
+pytest -q                                  # 235 passed
 
 python scripts/redteam.py --base-url http://localhost:8000   # against a running instance
 ```
@@ -347,7 +347,7 @@ Full request/response examples are in [docs/API.md](docs/API.md); the running se
 
 | Evidence | Where |
 |---|---|
-| 232 automated tests (unit, integration, live-server concurrency), run on both engines | `backend/tests/` |
+| 235 automated tests (unit, integration, live-server concurrency), run on both engines | `backend/tests/` |
 | 27-check attack run against a live instance | `backend/scripts/redteam.py` |
 | Concurrency: 20 racing withdrawals, 30 racing deposits, 20 duplicate keys, 40 opposite transfers | `backend/tests/test_concurrency.py` |
 | Tamper detection: triggers dropped, history edited, verifier catches it | `backend/tests/test_integrity_tamper.py` |
@@ -377,7 +377,7 @@ backend/
   scripts/seed.py      database initialiser (refuses demo data in prod)
   scripts/bootstrap_admin.py  first ADMIN, without an API call
   scripts/redteam.py   attack suite against a running instance
-  tests/               232 tests (SQLite by default, PostgreSQL via an env var)
+  tests/               235 tests (SQLite by default, PostgreSQL via an env var)
 prisma/
   schema.prisma        PostgreSQL models; Node owns DDL, Python owns runtime
   migrations/          the migration `prisma migrate deploy` applies

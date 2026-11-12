@@ -11,7 +11,7 @@ engineering judgement was mine:
   each one is enforced: code, transaction, or database constraint.
 - Every row in the decision log below is a proposal I did **not** accept; what I did accept is
   listed separately, under "What I kept from it".
-- I found **32 specific defects** in generated code. Each row records how I found it and what I
+- I found **33 specific defects** in generated code. Each row records how I found it and what I
   changed, because "the AI wrote it" is not an excuse a judge would accept.
 - Every claim in the README is traced to a test or a script in this repository, and every gap is
   written down in "Known limitations".
@@ -39,7 +39,7 @@ Two phases:
 | Where the lock is taken and why | decided | proposed middleware-level checks | D7, `tests/test_concurrency.py` |
 | First draft of most modules | reviewed and corrected all of it | wrote it | commit history; defect tables below |
 | Adversarial tests (concurrency, tamper, idempotency) | specified them and demanded them first | wrote the first versions | `tests/test_concurrency.py`, `test_integrity_tamper.py`, `test_idempotency.py` |
-| Finding defects in generated code | found 32 | produced them | the two tables below |
+| Finding defects in generated code | found 33 | produced them | the two tables below |
 | Deciding what **not** to claim in the docs | decided | kept proposing confident prose | `README.md` → "Known limitations" |
 | Database roles, bootstrap, health checks | specified the threat model | implemented | `deploy/postgres/`, `tests/test_db_roles.py` |
 
@@ -167,6 +167,7 @@ implementation. Most of the defects below were found that way.
 | G31 | `PostgresDatabase.schema_version()` | It raised `UndefinedTable` on an empty database — exactly the state a release step exists to fix — while the SQLite adapter returned `None` for the same situation | Running `python -m scripts.migrate` against a genuinely empty database, not against the test fixtures | Missing relation now reads as "no version yet" on both engines, and `/api/ready` can answer before the first migration |
 | G32 | The container's listening port | The Dockerfile hardcoded `--port 8000`, and so did the image health check. On Render the platform assigns the port in `$PORT`, so the process would have looked healthy in the logs while the load balancer answered **502** | Reading Render's port documentation before writing the blueprint, then noticing the number was also baked into `HEALTHCHECK` | `scripts/start.sh` binds `${PORT:-8000}` (Fly's `internal_port` still works through the fallback), the health check reads the same variable, and `tests/test_deploy_config.py` fails if a bare `--port 8000` ever returns |
 | G33 | Where the migration runs on a platform without a release hook | The release step was wired only to Fly's `release_command`. Render offers a pre-deploy command only on some plans, so a deploy there would have started the API against a database with no schema — the app would answer `/api/health` with 200 and 500 on every real route | Walking the Render deploy path start to finish instead of assuming the Fly design generalised | The entrypoint now runs `python -m scripts.migrate` before uvicorn under `set -eu` (a failed migration aborts the boot), with `LEDGERLINE_SKIP_STARTUP_MIGRATION=1` for platforms that run it as a separate pre-traffic step. Verified by booting the entrypoint on an arbitrary port against an empty database |
+| G34 | `make_redis_client()` on a malformed URL | `redis.Redis.from_url` raises `ValueError`, and it is called from `create_app` at import time — so one mistyped, entirely optional cache URL killed the process. That contradicts D13, where the limiter is documented to fail **open** because a cache outage must not stop a bank | The first real deploy, on Render: `ValueError: Redis URL must specify one of the following schemes` with a full traceback, because the dashboard value had been pasted with its quotes | Surrounding quotes and whitespace are stripped from both connection URLs when they load, and a URL that still will not parse is reported once on stderr and treated as "Redis not configured" — the app boots, `/api/health` says `redis.state: disabled`, and money movement is unaffected. Three tests |
 
 > The numbering skips **G21**: that defect belongs to a change that is not in this commit
 > history. I kept the numbers stable instead of renumbering, because other documents refer to them.
@@ -219,7 +220,7 @@ that decides whether those characters are correct:
 |---|---|
 | The invariants, and the enforcement point chosen for each | `THREATS.md` §2; every invariant has a test that fails if it is removed |
 | Every decision in the log above is a rejection of a proposal — the accepted ones are listed separately | the "what the AI proposed" column |
-| 32 defects found by reading, reasoning and running — not by trusting | the two defect tables, each with "how it surfaced" |
+| 33 defects found by reading, reasoning and running — not by trusting | the two defect tables, each with "how it surfaced" |
 | The adversarial cases that make the guarantees meaningful | `test_concurrency.py`, `test_integrity_tamper.py`, `test_idempotency.py`, `scripts/redteam.py` |
 | The decision to document gaps instead of hiding them | `README.md` → "Known limitations" (11 items), `docs/VERIFICATION.md` §9 |
 
