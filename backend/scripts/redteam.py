@@ -24,12 +24,40 @@ import httpx
 
 DEMO_PASSWORD = "LedgerLine!Demo2024"
 RESULTS: list[tuple[str, bool, str]] = []
+BLOCKED: list[tuple[str, str]] = []
 
 
 def record(name: str, ok: bool, detail: str = "") -> None:
     RESULTS.append((name, ok, detail))
     status = "PASS" if ok else "FAIL"
     print(f"  [{status}] {name}" + (f" — {detail}" if detail else ""))
+
+
+def record_blocked(name: str, detail: str) -> None:
+    """An intermediary answered, so the app was never tested.
+
+    Counting this as PASS would claim a control that was never exercised; counting
+    it as FAIL blames the app for something it never saw. It gets its own bucket.
+    """
+    BLOCKED.append((name, detail))
+    print(f"  [EDGE] {name}" + (f" — {detail}" if detail else ""))
+
+
+def is_our_error_envelope(response: httpx.Response) -> bool:
+    """True when the response body came from this API rather than a proxy.
+
+    Everything the app returns on an error path is JSON carrying
+    ``error.request_id`` (see ``_error_payload`` in main.py); a WAF or proxy
+    answering on its own behalf has no reason to produce that shape. Without this
+    check an edge 403 and an authorization 403 are the same three characters.
+    """
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    if not isinstance(body, dict):
+        return False
+    return "error" in body or "transaction" in body or "account" in body
 
 
 class Client:
@@ -248,10 +276,18 @@ def main() -> int:
         {"amount": "5.00", "description": "'; DROP TABLE ledger_entries; --"},
         str(uuid.uuid4()),
     )
-    record("SQL metacharacters are stored as data", response.status_code == 201, f"HTTP {response.status_code}")
+    if response.status_code == 403 and not is_our_error_envelope(response):
+        record_blocked("SQL metacharacters are stored as data", "HTTP 403 from an intermediary, not the API")
+    else:
+        record(
+            "SQL metacharacters are stored as data", response.status_code == 201, f"HTTP {response.status_code}"
+        )
 
     response = client.get(attacker_email, "/api/accounts/1%20OR%201=1")
-    record("SQL-ish path parameter is a 404", response.status_code == 404, f"HTTP {response.status_code}")
+    if response.status_code == 403 and not is_our_error_envelope(response):
+        record_blocked("SQL-ish path parameter is a 404", "HTTP 403 from an intermediary, not the API")
+    else:
+        record("SQL-ish path parameter is a 404", response.status_code == 404, f"HTTP {response.status_code}")
 
     response = client.http.get("/api/accounts", headers={"Authorization": "Bearer " + "x" * 500})
     record("garbage token is rejected quickly", response.status_code == 401, f"HTTP {response.status_code}")
@@ -276,7 +312,16 @@ def main() -> int:
     record("denied attempts appear in the audit trail", len(entries) >= 3, f"denials={len(entries)}")
 
     passed = sum(1 for _, ok, _ in RESULTS if ok)
-    print(f"\n{passed}/{len(RESULTS)} checks passed")
+    suffix = f" ({len(BLOCKED)} blocked by an intermediary)" if BLOCKED else ""
+    print(f"\n{passed}/{len(RESULTS)} checks passed{suffix}")
+
+    if BLOCKED:
+        print("BLOCKED UPSTREAM — neither a pass nor a failure of this deployment:")
+        for name, detail in BLOCKED:
+            print(f"  - {name} ({detail})")
+        print("  These payloads never reached the API, so they prove nothing either way.")
+        print("  Run the same script with --base-url http://127.0.0.1:8000 to exercise them.")
+
     if passed != len(RESULTS):
         print("FAILURES:")
         for name, ok, detail in RESULTS:
