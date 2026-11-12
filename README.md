@@ -10,6 +10,8 @@
 
 [![CI](https://github.com/Ganesh-Yash/Yaah/actions/workflows/ci.yml/badge.svg)](https://github.com/Ganesh-Yash/Yaah/actions/workflows/ci.yml)
 
+**[▶ Watch the 5-minute walkthrough](https://youtu.be/uq_DDZZ8uGo)** · **[Live deployment](https://balancevault-vcf6.onrender.com)**
+
 A small banking core: accounts, deposits, withdrawals and transfers that always balance, never pay
 twice, cannot be overdrawn by concurrent requests, and leave an append-only, hash-chained trail that
 an auditor can independently verify.
@@ -23,6 +25,8 @@ an auditor can independently verify.
 | **Frontend** | React 18 + TypeScript + Vite |
 | **Tests** | 239 tests: all pass on PostgreSQL 16, 224 pass + 15 skip on SQLite |
 | **Attack suite** | 27/27 checks against a running instance (`scripts/redteam.py`) |
+| **Live demo** | [balancevault-vcf6.onrender.com](https://balancevault-vcf6.onrender.com) — Render free tier, PostgreSQL on Neon, Redis on Upstash, all in Singapore. Free instances sleep after 15 idle minutes, so the first visit can take ~1 minute |
+| **Walkthrough** | [5-minute video](https://youtu.be/uq_DDZZ8uGo) — login, a transfer that balances, idempotent replay, RBAC, the integrity proof, and the attack suite |
 | **Status** | Deployed and runnable end to end; see [known limitations](#known-limitations) |
 
 > **Why Python and not the original Java/Maven scaffold?** The submission draft described a
