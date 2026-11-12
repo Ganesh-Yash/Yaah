@@ -30,6 +30,103 @@ jobs:
           for i in $(seq 30); do curl -fsS http://127.0.0.1:8000/api/health && break || sleep 1; done
           python scripts/redteam.py --base-url http://127.0.0.1:8000
 
+  postgres:
+    name: Tests on PostgreSQL 16
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: balancevault
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      LEDGERLINE_TEST_DATABASE_URL: postgresql://postgres:ci@127.0.0.1:5432/balancevault
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt redislite
+      # The full suite -- not a subset -- against a real server. Each test gets
+      # its own schema, so this also proves the migrations are idempotent.
+      - name: Run the whole suite on PostgreSQL
+        run: pytest -q
+      - name: Apply the Prisma migration and the two-role grants
+        if: always()
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+          PGPASSWORD=ci psql -h 127.0.0.1 -U postgres -d postgres -c 'CREATE DATABASE rolesci'
+          PGPASSWORD=ci psql -h 127.0.0.1 -U postgres -d rolesci -f ../deploy/postgres/01-roles.sql
+          PGPASSWORD=ci psql -h 127.0.0.1 -U postgres -d rolesci -f ../prisma/migrations/20260101000000_init/migration.sql
+          PGPASSWORD=ci psql -h 127.0.0.1 -U postgres -d rolesci -f ../deploy/postgres/02-grants.sql
+      - name: The app role must not be able to rewrite history
+        if: always()
+        run: |
+          output=$(PGPASSWORD=ci psql -h 127.0.0.1 -U postgres -d rolesci \
+            -c 'SET ROLE balancevault_app; UPDATE ledger_entries SET amount_minor = 1;' 2>&1 || true)
+          echo "$output"
+          echo "$output" | grep -q "permission denied" \
+            && echo "refused as expected" \
+            || { echo "::error::the application role was able to UPDATE ledger_entries"; exit 1; }
+      - name: Redis-backed limiter is live, not in-process
+        run: |
+          python scripts/seed.py --demo
+          LEDGERLINE_REDIS_URL=redis://127.0.0.1:6379/0 uvicorn ledgerline.main:app --port 8000 &
+          for i in $(seq 30); do curl -fsS http://127.0.0.1:8000/api/health && break || sleep 1; done
+          curl -fsS http://127.0.0.1:8000/api/health | python -c "import json,sys; d=json.load(sys.stdin); assert d['checks']['redis']['state']=='ok', d; assert d['backend']=='postgres', d; print('health ok:', d['checks'])"
+          curl -fsS http://127.0.0.1:8000/api/ready
+
+  prisma:
+    name: Prisma schema and migrations
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: balancevault
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    defaults:
+      run:
+        working-directory: prisma
+    env:
+      DATABASE_URL: postgresql://postgres:ci@127.0.0.1:5432/balancevault
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: prisma/package.json
+      # This is the step the build environment could not run: the Prisma engine
+      # binaries are downloaded here, where the network allows it.
+      - run: npm install --no-audit --no-fund
+      - name: Validate the schema
+        run: npx prisma validate
+      - name: Apply the migration as the migrator role
+        run: npx prisma migrate deploy
+      - name: The migration history must be clean afterwards
+        run: npx prisma migrate status
+
   frontend:
     name: Frontend build
     runs-on: ubuntu-latest

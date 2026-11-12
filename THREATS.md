@@ -159,7 +159,42 @@ The core promise: *the books always balance and the same request never pays twic
 
 ---
 
-## 8. Accepted risks and what I would do next
+## 8. The deployment surface: roles, Redis, bootstrap
+
+The first version answered "can an attacker move money?" This section answers the
+second question the deployed system creates: *what can an attacker do with the
+credentials and components around the ledger?*
+
+| # | Threat | Mitigation | Residual risk |
+|---|---|---|---|
+| T20 | SQL injection reaches the database and rewrites history | The API connects as `balancevault_app`, which has **no** `UPDATE`/`DELETE` on `ledger_entries`, `audit_log` or `transactions` and no DDL at all. Triggers block it a second time. Verified by `tests/test_db_roles.py`. | A compromised *migrator* credential can still change the schema — that is inherent to owning DDL, so it is held only by the migration job and the one-time bootstrap. |
+| T21 | An attacker who can write SQL *goes around* the triggers (the tamper tests do exactly this) | The hash chain, verified by an independent auditor endpoint, makes it detectable rather than silent. | Detection, not prevention. Stated plainly in §5. |
+| T22 | Rate limits evaporate when the API is scaled | Counters live in Redis, checked and incremented in one Lua script, so N workers share one budget (`tests/test_redis_limiter.py::test_shared_counter_across_two_workers`). | If Redis is unreachable the limiter **fails open** (below). |
+| T23 | Redis outage takes the whole service down | The limiter fails open and logs once; `/api/health` shows `redis.state = unavailable`. | During an outage the per-IP login throttle and per-user money-write throttle are effectively absent. Chosen deliberately: refusing all traffic because a cache is down is the worse failure for a bank API. The database-level guarantees (idempotency, non-negative balances, daily caps) are unaffected because they are not in Redis. |
+| T24 | Redis poisoning: someone writes to the limiter keyspace | Worst case is a *raised* or *lowered* limit for a key — it grants no data access and moves no money; the keyspace holds only timestamps. | An attacker with Redis write access can deny a user service by pre-filling their bucket. Mitigated by network isolation rather than application logic. |
+| T25 | The first-admin bootstrap becomes a backdoor | No unauthenticated endpoint exists. It is an operator-run script that needs database credentials, hard-codes `role = ADMIN`, **refuses to run when any admin exists** unless `--force`, reads the password from a prompt/stdin/env (never argv, which leaks into process listings and shell history), and writes `ADMIN_BOOTSTRAPPED` into the hash-chained audit log. | Anyone who can run the script with migrator credentials can create an admin — that is what "bootstrap" means, and it is why the migrator credential is the most protected secret in the deployment. |
+| T26 | A leaked demo/seed password reaches production | `seed_demo()` refuses outright when `LEDGERLINE_ENV=prod`, with **no override switch**, and creates no users when it refuses (`tests/test_bootstrap.py::TestDemoSeedIsRefusedInProduction`). The first admin comes from the bootstrap script instead. | Demo data on a staging box is still demo data; the refusal is a guard, not a policy. |
+| T27 | Health endpoints leak topology | `/api/health` reports booleans, a backend name and a schema version — no DSN, no host, no version of PostgreSQL. `/api/ready` returns the same shape with a 503 while the schema is absent. | The endpoint is unauthenticated by necessity (a load balancer has no token). It reveals that this is PostgreSQL, which is low value to an attacker who can already reach the port. |
+| T28 | Two engines drift, so tests pass and production differs | `tests/test_schema_parity.py` compares the Prisma models, the Postgres migration and the SQLite schema; the same 200+ tests run on both engines in CI. | A Postgres-only SQL feature could still behave differently at runtime. Mitigated by running the *whole* suite against a real server, not a subset. |
+
+### The fail-open decision, stated plainly
+
+A rate limiter is a protection, not a correctness guarantee. Every money invariant
+— legs summing to zero, non-negative balances, one movement per idempotency key,
+the daily cap — is enforced in the database transaction, not in Redis. So when
+Redis is unreachable the honest options were:
+
+1. **fail closed** — refuse all writes; a cache outage becomes an outage;
+2. **fail open** — allow the request, log once, and show it in `/api/health`.
+
+I chose (2) because the thing being protected (the ledger) is still protected, and
+because a bank API that stops taking transfers when a rate-limit cache hiccups is
+a worse product than one that briefly takes more requests than intended. This is
+the kind of choice that deserves to be visible to a reviewer rather than buried,
+so it is also reported by the health endpoint and covered by
+`test_fails_open_when_redis_is_unreachable`.
+
+## 9. Accepted risks and what I would do next
 
 These are real gaps, not hypotheticals. I would rather list them than be caught by a judge who finds
 them.
@@ -188,7 +223,7 @@ were removed from the accepted-risk list rather than left there to look thorough
 
 ---
 
-## 9. Two deliberate design decisions worth defending
+## 10. Two deliberate design decisions worth defending
 
 **1. Unauthenticated failures are not written to the audit trail.** Every other denial is. Writing a
 row per forged token would let anyone with `curl` fill the disk and serialise the single writer behind
@@ -203,7 +238,7 @@ keeps the at-most-once property (no money moved) while remaining usable. Proven 
 
 ---
 
-## 10. Reproducing the verification
+## 11. Reproducing the verification
 
 ```bash
 # 1. unit + integration + live concurrency suite

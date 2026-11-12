@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, Query, status
 
 from .. import audit, security
 from ..config import Settings
-from ..db import Database, utcnow_iso
+from ..db import is_unique_violation, Database, utcnow_iso
 from ..deps import get_db, get_settings, require_roles
 from ..errors import conflict, not_found, validation_error
 from ..models import CreateAccountRequest, CreateStaffUserRequest, FreezeRequest
@@ -92,7 +92,9 @@ def create_staff_user(
                 target_id=user_id,
                 detail={"email": email, "role": payload.role},
             )
-    except sqlite3.IntegrityError as exc:
+    except Exception as exc:
+        if not is_unique_violation(exc):
+            raise
         raise conflict("EMAIL_ALREADY_REGISTERED", "An account with this email already exists.") from exc
     return {
         "user": {

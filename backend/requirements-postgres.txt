@@ -1,0 +1,12 @@
+# Optional extras for running the suite against a real PostgreSQL + Redis.
+#
+#   pip install -r requirements-postgres.txt
+#   LEDGERLINE_TEST_DATABASE_URL=postgresql://... pytest -q     # 211 passed
+#
+# pgserver bundles PostgreSQL 16 binaries for Linux/macOS, so a laptop or CI can
+# run the integration path without Docker. On Windows, use a real server (or the
+# compose stack) and point the same environment variable at it.
+pgserver>=0.1.4
+# A real redis-server, launched by the tests that need one. Not a mock: the
+# shared-counter test is meaningless against a fake.
+redislite>=6.2.912957

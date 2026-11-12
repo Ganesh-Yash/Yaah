@@ -1,0 +1,17 @@
+{
+  "name": "balancevault-schema",
+  "private": true,
+  "version": "2.0.0",
+  "description": "Prisma schema and migrations for BalanceVault (PostgreSQL). The API is Python; this package owns DDL only.",
+  "scripts": {
+    "validate": "prisma validate",
+    "format": "prisma format",
+    "migrate:deploy": "prisma migrate deploy",
+    "migrate:status": "prisma migrate status",
+    "migrate:dev": "prisma migrate dev",
+    "diff": "prisma migrate diff --from-migrations migrations --to-schema-datamodel schema.prisma --shadow-database-url $SHADOW_DATABASE_URL --exit-code"
+  },
+  "devDependencies": {
+    "prisma": "6.19.0"
+  }
+}

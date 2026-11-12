@@ -100,10 +100,11 @@ def ensure_system_accounts(conn: sqlite3.Connection, currencies: Iterable[str]) 
     for currency in currencies:
         conn.execute(
             """
-            INSERT OR IGNORE INTO accounts
+            INSERT INTO accounts
                 (id, account_number, owner_user_id, name, currency, balance_minor,
                  is_system, status, version, created_at)
             VALUES (?, ?, NULL, ?, ?, 0, 1, 'ACTIVE', 0, ?)
+            ON CONFLICT (id) DO NOTHING
             """,
             (
                 system_account_id(currency),

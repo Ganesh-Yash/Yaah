@@ -6,6 +6,7 @@ cross-connection locking rather than a shared in-memory database.
 
 from __future__ import annotations
 
+import os
 import sys
 import uuid
 from pathlib import Path
@@ -24,9 +25,47 @@ from ledgerline.security import hash_password  # noqa: E402
 PASSWORD = "CorrectHorseBattery9"
 
 
+PG_URL = os.environ.get("LEDGERLINE_TEST_DATABASE_URL")
+
+
+def _new_pg_schema() -> str:
+    """One schema per test, dropped afterwards — a real server, without the cost
+    of 167 CREATE DATABASE calls."""
+    import psycopg
+
+    name = f"t_{uuid.uuid4().hex[:12]}"
+    with psycopg.connect(PG_URL, autocommit=True) as admin:
+        admin.execute(f'CREATE SCHEMA "{name}"')
+    return name
+
+
 @pytest.fixture()
-def settings(tmp_path: Path) -> Settings:
-    return Settings(
+def settings(tmp_path: Path):
+    """SQLite by default; PostgreSQL when LEDGERLINE_TEST_DATABASE_URL is set.
+
+    The same 167 tests run on both engines — that is the point of the port, not
+    a separate PostgreSQL-only suite.
+    """
+    if PG_URL:
+        schema = _new_pg_schema()
+        settings = Settings(
+            env="test",
+            database_path=str(tmp_path / "unused.db"),
+            database_url=PG_URL,
+            database_schema=schema,
+            jwt_secret="test-secret-" + "x" * 40,
+            bcrypt_rounds=4,
+            max_amount_minor=100_000_00,
+            demo_seed_enabled=False,
+        )
+        yield settings
+        import psycopg
+
+        with psycopg.connect(PG_URL, autocommit=True) as admin:
+            admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
+        return
+
+    yield Settings(
         env="test",
         database_path=str(tmp_path / "ledgerline.db"),
         jwt_secret="test-secret-" + "x" * 40,

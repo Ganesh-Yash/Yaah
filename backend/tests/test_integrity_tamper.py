@@ -7,9 +7,9 @@ threat the hash chain exists for.
 
 from __future__ import annotations
 
-import sqlite3
-
 import pytest
+
+from dialect import drop_non_negative_guard, drop_trigger, guard_errors, trigger_name_for
 
 
 @pytest.fixture()
@@ -33,7 +33,7 @@ class TestAppendOnly:
         ],
     )
     def test_history_cannot_be_modified(self, api, funded, statement):
-        with pytest.raises(sqlite3.DatabaseError):
+        with pytest.raises(guard_errors()):
             with api.db.write() as conn:
                 conn.execute(statement)
 
@@ -46,7 +46,7 @@ class TestTamperDetection:
     def _break_chain(self, api):
         """Simulate an attacker who can write SQL: drop the guard, edit history."""
         with api.db.write() as conn:
-            conn.execute("DROP TRIGGER trg_ledger_no_update")
+            conn.execute(drop_trigger(api.db, trigger_name_for(api.db, "trg_ledger_no_update")))
             conn.execute("UPDATE ledger_entries SET amount_minor = 1 WHERE id = 1")
 
     def test_integrity_notices_an_edited_ledger_entry(self, api, auditor, funded):
@@ -66,7 +66,7 @@ class TestTamperDetection:
 
     def test_integrity_notices_a_deleted_ledger_entry(self, api, auditor, funded):
         with api.db.write() as conn:
-            conn.execute("DROP TRIGGER trg_ledger_no_delete")
+            conn.execute(drop_trigger(api.db, trigger_name_for(api.db, "trg_ledger_no_delete")))
             conn.execute("DELETE FROM ledger_entries WHERE id = 2")
 
         report = api.integrity(auditor)
@@ -77,7 +77,7 @@ class TestTamperDetection:
 
     def test_integrity_notices_a_rewritten_audit_row(self, api, auditor, funded):
         with api.db.write() as conn:
-            conn.execute("DROP TRIGGER trg_audit_no_update")
+            conn.execute(drop_trigger(api.db, trigger_name_for(api.db, "trg_audit_no_update")))
             conn.execute("UPDATE audit_log SET actor_role = 'ADMIN' WHERE id = 1")
 
         report = api.integrity(auditor)
@@ -87,7 +87,11 @@ class TestTamperDetection:
 
     def test_integrity_notices_a_moved_chain_head(self, api, auditor, funded):
         with api.db.write() as conn:
-            conn.execute("UPDATE chain_state SET last_hash = 'f' * 64 WHERE name = 'ledger'")
+            # The literal is built in Python: `'f' * 64` is a SQLite-only
+            # expression, and this line has to break the same chain on both.
+            conn.execute(
+                "UPDATE chain_state SET last_hash = ? WHERE name = 'ledger'", ("f" * 64,)
+            )
         report = api.integrity(auditor)
         assert report["ok"] is False
         failures = {check["name"] for check in report["checks"] if not check["ok"]}
@@ -106,8 +110,22 @@ class TestTamperDetection:
     def test_a_negative_customer_balance_is_detected(self, api, auditor, funded):
         with api.db.write() as conn:
             # The CHECK constraint makes this impossible through SQL...
-            with pytest.raises(sqlite3.DatabaseError):
+            with pytest.raises(guard_errors()):
                 conn.execute("UPDATE accounts SET balance_minor = -1 WHERE is_system = 0")
+
+    def test_the_guard_can_be_removed_and_the_verifier_notices(self, api, auditor, funded):
+        """Only Postgres can drop the CHECK without rebuilding the table; that is
+        exactly the insider case the verifier is for."""
+        unlock = drop_non_negative_guard(api.db)
+        if unlock is None:
+            pytest.skip("SQLite cannot drop a CHECK constraint in place")
+        with api.db.write() as conn:
+            conn.execute(unlock)
+            conn.execute("UPDATE accounts SET balance_minor = -1 WHERE is_system = 0")
+        report = api.integrity(auditor)
+        assert report["ok"] is False
+        failures = {check["name"] for check in report["checks"] if not check["ok"]}
+        assert "no_negative_customer_balances" in failures
 
 
 class TestLedgerShape:

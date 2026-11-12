@@ -201,8 +201,18 @@ def statement(
     limit = max(1, min(int(limit), MAX_PAGE_SIZE))
     with db.read() as conn:
         account = fetch_authorized_account(conn, principal, account_id)
+        # The cursor predicate is built in Python rather than written as
+        # ``(? IS NULL OR r.id < ?)``: Postgres cannot infer the type of an
+        # untyped NULL parameter, and building the clause keeps one query text
+        # that runs unchanged on both engines.
+        params: list[Any] = [account_id]
+        cursor_clause = ""
+        if before_id is not None:
+            cursor_clause = "WHERE r.id < ?"
+            params.append(before_id)
+        params.append(limit)
         rows = conn.execute(
-            """
+            f"""
             WITH running AS (
                 SELECT e.id, e.transaction_id, e.amount_minor, e.currency, e.created_at,
                        SUM(e.amount_minor) OVER (ORDER BY e.id) AS running_balance_minor
@@ -211,11 +221,11 @@ def statement(
             )
             SELECT r.*, t.type AS tx_type, t.description
               FROM running r JOIN transactions t ON t.id = r.transaction_id
-             WHERE (? IS NULL OR r.id < ?)
+             {cursor_clause}
              ORDER BY r.id DESC
              LIMIT ?
             """,
-            (account_id, before_id, before_id, limit),
+            tuple(params),
         ).fetchall()
 
     entries = [

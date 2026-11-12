@@ -4,13 +4,13 @@ Everything the README claims as "verified" points here. This file records **what
 executed, on which machine, with what output** — and, at the bottom, what was *not* executed and is
 therefore never claimed.
 
-Last updated: 2026-11-08.
+Last updated: 2026-11-12 (PostgreSQL, Redis, roles, bootstrap).
 
 ## Where things were run
 
 | Environment | Used for | Runtime |
 |---|---|---|
-| Linux container (author's build environment) | full test suite, attack suite, HTTP matrix, frontend production build | Python 3.11.2, Node 22.22.3, SQLite 3.40.1 |
+| Linux container (author's build environment) | full test suite on **both** engines, attack suite, HTTP matrix, frontend production build | Python 3.11.2, Node 22.22.3, SQLite 3.40.1, **PostgreSQL 16.2**, **Redis 7 (redislite)** |
 | Windows 11 (`10.0.26300`), `cmd.exe` | full test suite, attack suite, seed, live demo UI | project `.venv` (Python 3.10), Node 22 |
 | GitHub Actions `ubuntu-latest` | tests + attack suite + frontend build + Docker image build, on every push | per `.github/workflows/ci.yml` |
 
@@ -21,10 +21,15 @@ cd backend
 python -m pytest -q
 ```
 
-| Run | Result | Wall clock |
-|---|---|---|
-| Linux container | **167 passed** | 16.47 s |
-| Windows 11, `cmd.exe` | **155 passed** | 41.35 s — that run predates `tests/test_limits.py`; the suite on this branch is 167 |
+| Run | Command | Result | Wall clock |
+|---|---|---|---|
+| Linux container, SQLite | `pytest -q` | **201 passed, 14 skipped** | 24.1 s |
+| Linux container, **PostgreSQL 16.2** | `LEDGERLINE_TEST_DATABASE_URL=… pytest -q` | **215 passed** | 38.9 s |
+| Windows 11, `cmd.exe` | `pytest -q` | **155 passed** | 41.35 s — that run predates `tests/test_limits.py` and the PostgreSQL work |
+
+The 14 skips on SQLite are the tests that only make sense on a real server or a droppable constraint:
+13 role/privilege tests (`test_db_roles.py`, no `LEDGERLINE_TEST_DATABASE_URL`) and one tamper test
+that needs `ALTER TABLE … DROP CONSTRAINT`. Nothing is skipped on PostgreSQL.
 
 Breakdown (from `pytest --collect-only`):
 
@@ -39,6 +44,10 @@ Breakdown (from `pytest --collect-only`):
 | `tests/test_limits.py` | 7 | per-account daily outflow cap: shared withdrawal/transfer counter, audit row, concurrency, `0` disables |
 | `tests/test_audit.py` | 9 | audit rows for allowed and denied actions, statement completeness |
 | `tests/test_concurrency.py` | 6 | parallel withdrawals/transfers, one-writer serialisation, balance floor |
+| `tests/test_redis_limiter.py` | 11 | shared counters across two workers, window expiry, fail-open on a dead Redis, app wiring, health reporting |
+| `tests/test_bootstrap.py` | 14 | first admin via script: role, audit row, refusal to run twice, CLI paths, demo-seed refusal in prod |
+| `tests/test_db_roles.py` | 13 | app role refused `UPDATE`/`DELETE`/`TRUNCATE`/`CREATE`/`DROP`; migrator owns the schema; grant coverage |
+| `tests/test_schema_parity.py` | 8 | Prisma models ⇄ Postgres migration ⇄ SQLite schema; no float near money; both engines seed a chain head |
 
 ## 2. Attack suite against a running instance
 
@@ -115,14 +124,73 @@ cd frontend && npm ci && npm run build
 The "Backend tests" job runs the whole suite **and** starts the API to run `scripts/redteam.py`
 against it, so a regression in the attack surface fails the build, not just a review.
 
-## 6. What was *not* verified
+## 6. PostgreSQL, Redis and the database roles (added requirements)
+
+Everything in this section was executed in this environment. PostgreSQL 16.2 came from the
+`pgserver` package (a real server, not a mock) and Redis from `redislite` (a real `redis-server`).
+
+| Claim | How it was verified | Output |
+|---|---|---|
+| The whole suite runs on PostgreSQL | `LEDGERLINE_TEST_DATABASE_URL=postgresql://… pytest -q`, each test in its own schema | `215 passed in 38.90s` |
+| The suite still runs on SQLite | `pytest -q` | `201 passed, 14 skipped` |
+| Concurrency guarantees hold on Postgres | the same `test_concurrency.py` (20 racing withdrawals, 20 duplicate keys, 40 opposite transfers) against a live uvicorn on the PG backend | all 6 pass |
+| Append-only is enforced by triggers, not luck | `test_integrity_tamper.py` drops the trigger, rewrites history, and requires the verifier to notice — on both engines | 15 pass on PG, 14 pass + 1 skip on SQLite |
+| The API role cannot rewrite the ledger | `test_db_roles.py` applies the real deployment SQL to a throwaway database | `13 passed` |
+| Redis limits are shared across workers | two `RedisSlidingWindowLimiter` instances over one real Redis, limit 5 | 5 allowed, 2 refused |
+| Health reports the truth | `/api/health` on a Redis-configured app, and `/api/ready` | `checks.redis.state` in `{ok, unavailable}`, `/api/ready` → 200 |
+| The bootstrap admin can log in and act | `test_bootstrap.py` creates it, logs in over HTTP, calls `GET /api/admin/users` | `14 passed` |
+| Demo accounts cannot reach production | `seed_demo` with `LEDGERLINE_ENV=prod` | `RuntimeError`, zero users created |
+| Prisma models match the real DDL | `test_schema_parity.py` parses all three artefacts | `8 passed` |
+
+Reproduce in one go:
+
+```bash
+cd backend
+pip install -r requirements-postgres.txt        # pgserver bundles PostgreSQL 16
+python -c "import pgserver,pathlib,time; s=pgserver.get_server(pathlib.Path('/tmp/pg')); print(s.get_uri()); time.sleep(3600)" &
+export LEDGERLINE_TEST_DATABASE_URL="$(cat /tmp/pg_uri)"   # the URI printed above
+pytest -q                                       # 215 passed
+```
+
+## 7. The API running on PostgreSQL, attacked end to end
+
+The suite proves the units; this proves the deployment shape. Executed here against PostgreSQL 16.2
+with the API running as `balancevault_app`:
+
+```
+psql: 01-roles.sql -> migration.sql -> 02-grants.sql         (throwaway database, real files)
+python -m scripts.bootstrap_admin --email admin@bv.test --print-token
+    Created admin admin@bv.test (...) on postgres
+uvicorn ledgerline.main:app --port 8200   # LEDGERLINE_DATABASE_URL=postgresql://balancevault_app@...
+    [ledgerline] v1.0.0 ready env=dev
+GET /api/health
+    {"status":"ok","backend":"postgres","checks":{"database":{"ok":true},
+     "redis":{"ok":true,"state":"disabled"},"schema":{"version":"2"}}}
+GET /api/ready -> 200
+python scripts/seed.py --demo -> [seed] schema and system accounts ready: postgres / postgresql://…
+python scripts/redteam.py --base-url http://127.0.0.1:8200
+    [PASS] 20 racing withdrawals: 10 succeed, balance floors at 0.00 — success=10 balance=0.00
+    [PASS] 10 duplicate requests with one key create one transaction — transactions=1
+    [PASS] SQL metacharacters are stored as data — HTTP 201
+    [PASS] oversized body rejected — HTTP 413
+    [PASS] integrity report is green — failed=none
+    [PASS] customer funds are conserved and non-negative — customer_funds=2585.00
+    27/27 checks passed
+```
+
+That run is also how defect G28 was found: the seed script ignored the database URL and wrote to a
+local SQLite file, so the API started empty. The fix and its regression test are in
+`tests/test_bootstrap.py::TestSeedScriptUsesTheConfiguredBackend`.
+
+## 7. What was *not* verified
 
 Stated plainly, because the README does not claim it:
 
 | Not verified | Why | What the repo claims instead |
 |---|---|---|
 | Running the Docker **container** | the development machine has no Docker daemon | the *image build* is verified by CI (`docker build -t ledgerline:ci .`, green) |
-| PostgreSQL | no server available here | the port is documented in `docs/ARCHITECTURE.md` as a design, clearly marked untested |
-| Multi-node / horizontal scaling | SQLite, single writer | listed as a known limitation, not a feature |
+| Prisma **CLI** (`prisma validate`, `migrate deploy`) | the engine binaries cannot be downloaded in this environment | the migration SQL was applied to real PostgreSQL 16.2 in tests, and `test_schema_parity.py` guards drift; the CLI step is documented for CI |
+| The `deploy/docker-compose.yml` stack as a whole | no Docker daemon here | each part was run individually: migration SQL on PG 16.2, role files with 13 tests, API against that server with 215 tests. The YAML is syntax-checked only |
+| Multi-node / horizontal scaling | one writer at a time on both engines | listed as a known limitation, not a feature |
 | Chargeback / reversal workflow | out of the brief's scope | still listed as an open gap in `THREATS.md` (R5 keeps only that half) |
 | Demo video | could not record one in this environment | listed as the one missing deliverable |

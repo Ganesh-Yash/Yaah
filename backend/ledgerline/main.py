@@ -34,9 +34,9 @@ from starlette.staticfiles import StaticFiles
 from . import __version__
 from . import ctx as request_ctx
 from .config import Settings
-from .db import Database
+from .db import database_busy_types, make_database
 from .errors import AppError
-from .limiter import SlidingWindowLimiter
+from .limiter import make_limiter, make_redis_client
 from .routers import accounts, admin, audit_views, auth, meta, transfers
 from .seed import bootstrap, seed_demo
 
@@ -63,7 +63,7 @@ def _error_payload(code: str, message: str, request_id: str, details: dict[str, 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
-    db = Database(settings.database_path, settings.sqlite_busy_timeout_ms)
+    db = make_database(settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -71,8 +71,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         bootstrap(db)
         if settings.demo_seed_enabled:
             seed_demo(db, settings)
+        # Report the backend that is actually live, not the SQLite path that
+        # happens to be configured alongside it. Never the DSN: it contains a
+        # password and this line goes to the logs.
+        if getattr(db, "backend", "sqlite") == "postgres":
+            database_note = f"postgres schema={settings.database_schema or 'public'}"
+        else:
+            database_note = f"sqlite {settings.database_path}"
         print(
-            f"[ledgerline] v{__version__} ready env={settings.env} db={settings.database_path}",
+            f"[ledgerline] v{__version__} ready env={settings.env} db={database_note}",
             file=sys.stderr,
         )
         yield
@@ -89,8 +96,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = settings
     app.state.db = db
-    app.state.money_limiter = SlidingWindowLimiter(settings.money_writes_per_minute, 60)
-    app.state.login_limiter = SlidingWindowLimiter(100, 60)
+    redis_client = make_redis_client(settings)
+    app.state.redis = redis_client
+    app.state.money_limiter = make_limiter(
+        redis_client, limit=settings.money_writes_per_minute, window_seconds=60, prefix="ledgerline:money"
+    )
+    app.state.login_limiter = make_limiter(
+        redis_client, limit=100, window_seconds=60, prefix="ledgerline:login"
+    )
 
     # --- middleware -------------------------------------------------------
 
@@ -209,9 +222,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             content=_error_payload(code, message, _request_id(request)),
         )
 
-    @app.exception_handler(sqlite3.OperationalError)
-    async def sqlite_error_handler(request: Request, exc: sqlite3.OperationalError) -> JSONResponse:
-        logger.error("sqlite operational error: %s", exc)
+    async def database_busy_handler(request: Request, exc: Exception) -> JSONResponse:
+        # Same answer for "the writer lock timed out" on either engine: the
+        # client should retry with the same Idempotency-Key, which is safe.
+        logger.error("database busy: %s", exc)
         return JSONResponse(
             status_code=503,
             content=_error_payload(
@@ -221,6 +235,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ),
             headers={"Retry-After": "1"},
         )
+
+    for _exc_type in database_busy_types():
+        app.add_exception_handler(_exc_type, database_busy_handler)
 
     @app.exception_handler(Exception)
     async def unhandled_handler(request: Request, exc: Exception) -> JSONResponse:
