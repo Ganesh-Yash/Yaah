@@ -1,0 +1,44 @@
+# A single always-on machine: the app, the dashboard and the API on one port.
+# Copy to fly.toml and change `app` + `primary_region`:
+#
+#   cp fly.toml.example fly.toml
+#   fly launch --no-deploy          # or: fly apps create balancevault-<you>
+#   fly secrets set ...             # see docs/DEPLOYMENT.md, never put secrets here
+#   fly deploy
+#
+# PostgreSQL and Redis are expected to be managed services (Neon, Upstash, ...);
+# this file only describes the application.
+
+app = "balancevault-CHANGEME"
+primary_region = "sin"              # keep this in the same region as Postgres + Redis
+
+[build]
+  dockerfile = "Dockerfile"         # the root one: it builds the SPA into the image
+
+[env]
+  LEDGERLINE_ENV = "prod"           # requires a >=32 character JWT secret; HSTS on
+
+# Runs before the new release receives traffic, and fails the deploy if the
+# database cannot be brought to the expected schema. Idempotent.
+[deploy]
+  release_command = "python -m scripts.migrate"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = false        # these three lines are what make it permanent
+  auto_start_machines = true
+  min_machines_running = 1
+
+  # Ready means "the database answers and the schema is present", not merely
+  # "the process started" — see /api/ready.
+  [[http_service.checks]]
+    grace_period = "20s"
+    interval = "15s"
+    method = "GET"
+    path = "/api/ready"
+    timeout = "5s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"                  # 256 works; 512 leaves room for bcrypt bursts

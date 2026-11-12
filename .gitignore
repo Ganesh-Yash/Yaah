@@ -30,3 +30,6 @@ npm-debug.log*
 # Local preview artefacts (deploy/preview/start.sh)
 .pgdata/
 .preview/
+
+# A real Fly config is per-deployment; the template is fly.toml.example
+fly.toml

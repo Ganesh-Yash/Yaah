@@ -24,6 +24,9 @@ COPY backend/requirements.txt ./backend/requirements.txt
 RUN pip install --no-cache-dir -r backend/requirements.txt
 
 COPY backend/ ./backend/
+# The migration SQL ships with the image so the release step (scripts.migrate)
+# can bootstrap an empty database. pg.py resolves it at /app/prisma/migrations.
+COPY prisma/ ./prisma/
 COPY --from=frontend /build/frontend/dist ./frontend/dist
 
 # Unprivileged runtime user; /data is the only writable path it needs.

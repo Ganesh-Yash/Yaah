@@ -13,7 +13,7 @@ Two shapes, same API:
 > environment has no Docker daemon. Every component was exercised individually instead: the Prisma
 > migration applied to PostgreSQL 16.2, the role/privilege files applied and attacked
 > (`backend/tests/test_db_roles.py`, 13 tests), the full API test suite against that server
-> (215 tests), and the Redis limiter against a real Redis (`backend/tests/test_redis_limiter.py`, 11
+> (223 tests), and the Redis limiter against a real Redis (`backend/tests/test_redis_limiter.py`, 11
 > tests). The YAML is the only unexecuted part.
 
 ```bash
@@ -81,6 +81,41 @@ Two rules that keep this honest:
 
 `backend/tests/test_schema_parity.py` fails if `schema.prisma`, the migration SQL and the SQLite
 `schema.sql` disagree about tables or columns — that is the offline guard against drift.
+
+### Migrations on deploy
+
+The API runs as a role with no DDL rights, so the schema is applied by a **release step**, not by the
+app on startup:
+
+```bash
+cd backend && python -m scripts.migrate          # or: make migrate
+```
+
+| Platform | Where the command goes |
+|---|---|
+| Fly.io | `[deploy] release_command = "python -m scripts.migrate"` (see `fly.toml.example`) |
+| Railway / Render | a pre-deploy / release command in the service settings |
+| Docker Compose | the `migrate` service already does this (`prisma migrate deploy`) |
+
+Behaviour, and why it is safe to run on every deploy:
+
+- **Empty database** → applies `prisma/migrations/*/migration.sql` and confirms `schema_meta.version`.
+- **Schema already present** → changes nothing and prints the version (idempotent).
+- **No target configured** → exits `1`, so the platform stops the deploy instead of starting the API
+  against a database it cannot use.
+
+`LEDGERLINE_MIGRATION_DATABASE_URL` (optional) lets the release step connect with the **migrator**
+credential while the API keeps `LEDGERLINE_DATABASE_URL` as the **application** role. Unset, both use
+the same URL.
+
+> **What this script does not do:** it does not maintain its own migration ledger. Prisma owns
+> `_prisma_migrations`, and a private hand-rolled table would make a later `prisma migrate deploy`
+> believe nothing had been applied and re-run the initial migration. So `scripts.migrate` bootstraps an
+> empty database (the fresh-deploy case); once a deployment is live, schema changes go through
+> `prisma migrate deploy` — the workflow in the section above.
+
+The runtime image ships `prisma/migrations` for exactly this reason (`COPY prisma/ ./prisma/` in the
+root `Dockerfile`), because `pg.py` resolves the directory at `/app/prisma/migrations`.
 
 ## Database roles
 
@@ -216,6 +251,7 @@ bucket. Behind a proxy, set it.
 | `LEDGERLINE_DATABASE_PATH` | `./data/ledgerline.db` | SQLite file (directory is created); ignored when a URL is set |
 | `LEDGERLINE_DATABASE_URL` | unset | `postgresql://…` selects PostgreSQL. Unset = SQLite |
 | `LEDGERLINE_DATABASE_SCHEMA` | unset | Postgres schema for the connection (per-test isolation uses this) |
+| `LEDGERLINE_MIGRATION_DATABASE_URL` | unset | credential the release step uses for DDL; defaults to `LEDGERLINE_DATABASE_URL` |
 | `LEDGERLINE_REDIS_URL` | unset | `redis://…` shares rate-limit counters across workers |
 | `LEDGERLINE_BOOTSTRAP_PASSWORD` | unset | password for `scripts/bootstrap_admin.py` in automation |
 | `LEDGERLINE_DAILY_OUTFLOW_LIMIT_MINOR` | `100000000` (1,000,000.00) | per-account ceiling on withdrawals + outgoing transfers per UTC day; `0` disables |
@@ -345,5 +381,5 @@ why timestamps are stored as `TEXT` rather than `timestamptz`.
 Rollout advice: run the full suite against the target server before switching —
 
 ```bash
-LEDGERLINE_TEST_DATABASE_URL="$APP_URL" pytest -q     # 215 passed
+LEDGERLINE_TEST_DATABASE_URL="$APP_URL" pytest -q     # 223 passed
 ```
