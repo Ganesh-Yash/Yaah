@@ -1,0 +1,190 @@
+// Prisma owns the PostgreSQL schema and its migrations. The FastAPI application
+// owns every runtime query and does not import a Prisma client.
+//
+// Why this split is in the repo at all: the brief asks for PostgreSQL with
+// Prisma. Prisma's migration engine applies and tracks migrations
+// (`prisma migrate deploy`); duplicating the DDL by hand would let the two
+// drift. The application connects with psycopg and never touches prisma/*
+// except through this schema.
+//
+// TIMESTAMPS ARE TEXT ON PURPOSE. The application stores ISO-8601 strings in
+// both engines so that the same code path and the same tests run on SQLite and
+// PostgreSQL. Using `DateTime` here would make Prisma expect `timestamptz` and
+// fail `migrate diff` against the real columns.
+//
+// MONEY IS BigInt MINOR UNITS (cents), never Float/Decimal. A float cannot
+// represent 0.10 exactly, and a ledger that rounds is not a ledger.
+
+generator client {
+  provider = "prisma-client-js"
+  // Not used at runtime; present so `prisma generate` and `prisma validate`
+  // behave conventionally for anyone who opens this directory.
+  output   = "../node_modules/.prisma/client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id               String    @id
+  email            String    @unique
+  fullName         String    @map("full_name")
+  passwordHash     String    @map("password_hash")
+  role             String
+  status           String    @default("ACTIVE")
+  failedLoginCount Int       @default(0) @map("failed_login_count")
+  lockedUntil      String?   @map("locked_until")
+  createdAt        String    @map("created_at")
+  updatedAt        String    @map("updated_at")
+
+  sessions         Session[]
+  refreshTokens    RefreshToken[]
+  accounts         Account[]
+  initiatedTx      Transaction[]
+  idempotencyKeys  IdempotencyKey[]
+
+  @@map("users")
+}
+
+model Session {
+  id         String  @id
+  userId     String  @map("user_id")
+  createdAt  String  @map("created_at")
+  lastUsedAt String  @map("last_used_at")
+  revokedAt  String? @map("revoked_at")
+  createdIp  String? @map("created_ip")
+  userAgent  String? @map("user_agent")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model RefreshToken {
+  id           String  @id
+  userId       String  @map("user_id")
+  familyId     String  @map("family_id")
+  tokenHash    String  @unique @map("token_hash")
+  issuedAt     String  @map("issued_at")
+  expiresAt    String  @map("expires_at")
+  usedAt       String? @map("used_at")
+  revokedAt    String? @map("revoked_at")
+  replacedById String? @map("replaced_by_id")
+  createdIp    String? @map("created_ip")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([familyId])
+  @@map("refresh_tokens")
+}
+
+model Account {
+  id            String  @id
+  accountNumber String  @unique @map("account_number")
+  ownerUserId   String? @map("owner_user_id")
+  name          String
+  currency      String
+  balanceMinor  BigInt  @default(0) @map("balance_minor")
+  isSystem      Int     @default(0) @map("is_system")
+  status        String  @default("ACTIVE")
+  version       Int     @default(0)
+  createdAt     String  @map("created_at")
+
+  owner   User?         @relation(fields: [ownerUserId], references: [id])
+  entries LedgerEntry[]
+
+  @@index([ownerUserId])
+  @@map("accounts")
+}
+
+model Transaction {
+  id              String  @id
+  type            String
+  currency        String
+  amountMinor     BigInt  @map("amount_minor")
+  initiatorUserId String? @map("initiator_user_id")
+  description     String?
+  createdAt       String  @map("created_at")
+
+  initiator User?          @relation(fields: [initiatorUserId], references: [id])
+  entries   LedgerEntry[]
+
+  @@index([createdAt])
+  @@map("transactions")
+}
+
+model LedgerEntry {
+  id            BigInt @id @default(autoincrement())
+  transactionId String @map("transaction_id")
+  accountId     String @map("account_id")
+  amountMinor   BigInt @map("amount_minor")
+  currency      String
+  createdAt     String @map("created_at")
+  prevHash      String @map("prev_hash")
+  entryHash     String @unique @map("entry_hash")
+
+  transaction Transaction @relation(fields: [transactionId], references: [id])
+  account     Account     @relation(fields: [accountId], references: [id])
+
+  @@index([accountId, id])
+  @@map("ledger_entries")
+}
+
+model IdempotencyKey {
+  id            String  @id
+  userId        String  @map("user_id")
+  scope         String
+  key           String
+  requestHash   String  @map("request_hash")
+  responseStatus Int    @map("response_status")
+  responseBody  String  @map("response_body")
+  transactionId String? @map("transaction_id")
+  createdAt     String  @map("created_at")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@unique([userId, scope, key])
+  @@map("idempotency_keys")
+}
+
+model AuditLog {
+  id          BigInt  @id @default(autoincrement())
+  actorUserId String? @map("actor_user_id")
+  actorRole   String? @map("actor_role")
+  subject     String?
+  action      String
+  outcome     String
+  targetType  String? @map("target_type")
+  targetId    String? @map("target_id")
+  ip          String?
+  userAgent   String? @map("user_agent")
+  requestId   String? @map("request_id")
+  detail      String?
+  createdAt   String  @map("created_at")
+  prevHash    String  @map("prev_hash")
+  entryHash   String  @unique @map("entry_hash")
+
+  @@index([createdAt])
+  @@index([action, createdAt])
+  @@index([subject, createdAt])
+  @@map("audit_log")
+}
+
+model ChainState {
+  name     String @id
+  lastId   BigInt @map("last_id")
+  lastHash String @map("last_hash")
+
+  @@map("chain_state")
+}
+
+model SchemaMeta {
+  key   String @id
+  value String
+
+  @@map("schema_meta")
+}

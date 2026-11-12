@@ -1,0 +1,3 @@
+# Prisma migration lock — do not edit by hand.
+# Committed so `prisma migrate deploy` knows which engine the history targets.
+provider = "postgresql"
