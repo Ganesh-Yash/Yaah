@@ -71,8 +71,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         bootstrap(db)
         if settings.demo_seed_enabled:
             seed_demo(db, settings)
+        # Report the backend that is actually live, not the SQLite path that
+        # happens to be configured alongside it. Never the DSN: it contains a
+        # password and this line goes to the logs.
+        if getattr(db, "backend", "sqlite") == "postgres":
+            database_note = f"postgres schema={settings.database_schema or 'public'}"
+        else:
+            database_note = f"sqlite {settings.database_path}"
         print(
-            f"[ledgerline] v{__version__} ready env={settings.env} db={settings.database_path}",
+            f"[ledgerline] v{__version__} ready env={settings.env} db={database_note}",
             file=sys.stderr,
         )
         yield

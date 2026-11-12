@@ -26,3 +26,7 @@ npm-debug.log*
 .DS_Store
 .idea/
 .vscode/
+
+# Local preview artefacts (deploy/preview/start.sh)
+.pgdata/
+.preview/

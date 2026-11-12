@@ -116,6 +116,24 @@ why it is written down here.
 Redis holds only timestamps. There is nothing in it worth backing up; AOF is enabled so a restart does
 not reset everyone's budget.
 
+## Local preview (development only)
+
+`deploy/preview/start.sh` runs the full PostgreSQL stack without Docker: a cluster in `./.pgdata`
+(inside the repository, so a sandbox or laptop restart does not strand it), the two roles, the Prisma
+migration, demo data, the built dashboard and the API, all on one port.
+
+```bash
+deploy/preview/start.sh            # http://localhost:8200
+PORT=9000 deploy/preview/start.sh  # another port
+```
+
+It is idempotent and repairs only what is missing — virtualenv, cluster, database, `frontend/dist`
+(which is gitignored and excluded from snapshots), then starts the API in the foreground. Re-running
+it is the recovery procedure after a restart, and it is what the reviewer-facing preview runs on.
+
+**Not a production path**, by construction: trust authentication on a local socket, a fixed
+development JWT secret, and demo credentials. Production is the compose stack above.
+
 ## Option 2 — bare metal / a VM
 
 ```bash
