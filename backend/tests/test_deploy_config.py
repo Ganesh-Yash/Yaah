@@ -57,7 +57,7 @@ def blueprint() -> dict:
     return yaml.safe_load(RENDER_YAML.read_text())
 
 
-def test_blueprint_declares_one_always_on_docker_service(blueprint):
+def test_blueprint_declares_one_docker_service(blueprint):
     services = blueprint["services"]
     assert len(services) == 1, "one service: the API serves the built SPA itself"
 
@@ -65,9 +65,9 @@ def test_blueprint_declares_one_always_on_docker_service(blueprint):
     assert service["type"] == "web"
     assert service["runtime"] == "docker"
     assert service["dockerfilePath"].lstrip("./") == "Dockerfile"
-    # Free web services spin down after 15 minutes; a sleeping service answers the
-    # first click with ~30 s of nothing, which defeats the point of deploying.
-    assert service["plan"] != "free"
+    # The plan must be *stated*. Render defaults to a paid instance type when the
+    # key is absent, so omitting it silently turns a free deploy into a bill.
+    assert service["plan"] in {"free", "starter"}
     assert service["region"] == "singapore"
 
 

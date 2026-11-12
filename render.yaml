@@ -8,16 +8,22 @@
 #           the main difference from Fly). Point this at the branch you want live;
 #           `main` is the default, so a branch that is not merged yet must be named
 #           here, or be promoted to main first.
-#   region  `singapore` because Neon has no India region and Upstash/Fly/Render
+#   region  `singapore` because Neon has no India region and Upstash/Render/Fly
 #           all do have Singapore. Keep the database in the same region: a
 #           cross-region database costs ~50 ms *per query*, and one transfer is
 #           several queries.
 #
-# The plan is deliberately not `free`:
-#   * free web services spin down after 15 minutes of inactivity, and a sleeping
-#     service answers the first click with ~30 s of nothing;
-#   * free Render Postgres databases expire after 30 days.
-# Both are disqualifying for a link that judges may open at any time.
+# Cost: this blueprint is the zero-cost configuration. `free` does not mean
+# instant, and the two facts that follow from it are stated here rather than
+# discovered during a demo:
+#
+#   * a free web service spins down after 15 minutes without traffic and the next
+#     request waits about a minute for it to boot;
+#   * the plan is written out explicitly. Omitting `plan` lets Render default to a
+#     paid instance type, which is the one mistake here that costs money.
+#
+# Upgrading is a dropdown in the dashboard, not an edit to this file: switching
+# this service to `starter` (~$7/month) removes the sleep entirely.
 services:
   - type: web
     name: balancevault
@@ -26,11 +32,10 @@ services:
     dockerContext: .
     branch: main
     region: singapore
-    plan: starter
+    plan: free
     # 200 only when the database answers AND the schema is present — not merely
-    # "the process started". Neon's free plan suspends when idle and this check
-    # keeps it awake, so on Neon free point this at /api/health instead (see
-    # docs/DEPLOYMENT.md, "Deploying on Render").
+    # "the process started". Neon's free plan suspends when idle; on a free Render
+    # service that is fine, because the whole service sleeps anyway.
     healthCheckPath: /api/ready
     autoDeploy: true
     envVars:
@@ -40,11 +45,21 @@ services:
       - key: LEDGERLINE_JWT_SECRET
         generateValue: true
       # Neon (same region) with ?sslmode=require. Set in the dashboard.
+      # Do NOT point this at free Render Postgres: it expires 30 days after
+      # creation, and the whole ledger goes with it.
       - key: LEDGERLINE_DATABASE_URL
         sync: false
       # Upstash (same region), rediss:// — TLS, not redis://.
       - key: LEDGERLINE_REDIS_URL
         sync: false
+      # Free instances have no Shell tab, so there is no `bootstrap_admin` to run.
+      # Set this to 1 to seed the documented demo users on first boot (an ADMIN
+      # among them), then change that password from the dashboard and set this
+      # back to 0. Left off, the cleanest path is to run the bootstrap script from
+      # your own machine against the Neon URL — see docs/DEPLOYMENT.md.
+      # - key: LEDGERLINE_DEMO_SEED
+      #   value: "1"
+      #
       # Optional: the migrator credential, if the API role has no DDL rights.
       # - key: LEDGERLINE_MIGRATION_DATABASE_URL
       #   sync: false
@@ -57,8 +72,9 @@ services:
 
 # Note on migrations: the container runs `python -m scripts.migrate` on boot
 # (scripts/start.sh) before uvicorn starts, so this blueprint needs no pre-deploy
-# command. Paid instances can use one instead — it runs before traffic is switched
-# over and fails the deploy rather than restart-looping:
+# command — which is fortunate, because a pre-deploy command is not available on
+# every plan. Paid instances can use one instead; it runs before traffic is
+# switched over and fails the deploy rather than restart-looping:
 #
 #     preDeployCommand: python -m scripts.migrate
 #
