@@ -23,8 +23,8 @@ python -m pytest -q
 
 | Run | Command | Result | Wall clock |
 |---|---|---|---|
-| Linux container, SQLite | `pytest -q` | **201 passed, 14 skipped** | 24.1 s |
-| Linux container, **PostgreSQL 16.2** | `LEDGERLINE_TEST_DATABASE_URL=… pytest -q` | **215 passed** | 38.9 s |
+| Linux container, SQLite | `pytest -q` | **203 passed, 14 skipped** | 24.1 s |
+| Linux container, **PostgreSQL 16.2** | `LEDGERLINE_TEST_DATABASE_URL=… pytest -q` | **217 passed** | 38.9 s |
 | Windows 11, `cmd.exe` | `pytest -q` | **155 passed** | 41.35 s — that run predates `tests/test_limits.py` and the PostgreSQL work |
 
 The 14 skips on SQLite are the tests that only make sense on a real server or a droppable constraint:
@@ -131,8 +131,8 @@ Everything in this section was executed in this environment. PostgreSQL 16.2 cam
 
 | Claim | How it was verified | Output |
 |---|---|---|
-| The whole suite runs on PostgreSQL | `LEDGERLINE_TEST_DATABASE_URL=postgresql://… pytest -q`, each test in its own schema | `215 passed in 38.90s` |
-| The suite still runs on SQLite | `pytest -q` | `201 passed, 14 skipped` |
+| The whole suite runs on PostgreSQL | `LEDGERLINE_TEST_DATABASE_URL=postgresql://… pytest -q`, each test in its own schema | `217 passed in 38.90s` |
+| The suite still runs on SQLite | `pytest -q` | `203 passed, 14 skipped` |
 | Concurrency guarantees hold on Postgres | the same `test_concurrency.py` (20 racing withdrawals, 20 duplicate keys, 40 opposite transfers) against a live uvicorn on the PG backend | all 6 pass |
 | Append-only is enforced by triggers, not luck | `test_integrity_tamper.py` drops the trigger, rewrites history, and requires the verifier to notice — on both engines | 15 pass on PG, 14 pass + 1 skip on SQLite |
 | The API role cannot rewrite the ledger | `test_db_roles.py` applies the real deployment SQL to a throwaway database | `13 passed` |
@@ -149,7 +149,7 @@ cd backend
 pip install -r requirements-postgres.txt        # pgserver bundles PostgreSQL 16
 python -c "import pgserver,pathlib,time; s=pgserver.get_server(pathlib.Path('/tmp/pg')); print(s.get_uri()); time.sleep(3600)" &
 export LEDGERLINE_TEST_DATABASE_URL="$(cat /tmp/pg_uri)"   # the URI printed above
-pytest -q                                       # 215 passed
+pytest -q                                       # 217 passed
 ```
 
 ## 7. The API running on PostgreSQL, attacked end to end
@@ -190,7 +190,7 @@ Stated plainly, because the README does not claim it:
 |---|---|---|
 | Running the Docker **container** | the development machine has no Docker daemon | the *image build* is verified by CI (`docker build -t ledgerline:ci .`, green) |
 | Prisma **CLI** (`prisma validate`, `migrate deploy`) | the engine binaries cannot be downloaded in this environment | the migration SQL was applied to real PostgreSQL 16.2 in tests, and `test_schema_parity.py` guards drift; the CLI step is documented for CI |
-| The `deploy/docker-compose.yml` stack as a whole | no Docker daemon here | each part was run individually: migration SQL on PG 16.2, role files with 13 tests, API against that server with 215 tests. The YAML is syntax-checked only |
+| The `deploy/docker-compose.yml` stack as a whole | no Docker daemon here | each part was run individually: migration SQL on PG 16.2, role files with 13 tests, API against that server with 217 tests. The YAML is syntax-checked only |
 | Multi-node / horizontal scaling | one writer at a time on both engines | listed as a known limitation, not a feature |
 | Chargeback / reversal workflow | out of the brief's scope | still listed as an open gap in `THREATS.md` (R5 keeps only that half) |
 | Demo video | could not record one in this environment | listed as the one missing deliverable |

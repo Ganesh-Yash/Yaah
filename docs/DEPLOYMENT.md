@@ -13,7 +13,7 @@ Two shapes, same API:
 > environment has no Docker daemon. Every component was exercised individually instead: the Prisma
 > migration applied to PostgreSQL 16.2, the role/privilege files applied and attacked
 > (`backend/tests/test_db_roles.py`, 13 tests), the full API test suite against that server
-> (215 tests), and the Redis limiter against a real Redis (`backend/tests/test_redis_limiter.py`, 11
+> (217 tests), and the Redis limiter against a real Redis (`backend/tests/test_redis_limiter.py`, 11
 > tests). The YAML is the only unexecuted part.
 
 ```bash
@@ -345,5 +345,5 @@ why timestamps are stored as `TEXT` rather than `timestamptz`.
 Rollout advice: run the full suite against the target server before switching —
 
 ```bash
-LEDGERLINE_TEST_DATABASE_URL="$APP_URL" pytest -q     # 215 passed
+LEDGERLINE_TEST_DATABASE_URL="$APP_URL" pytest -q     # 217 passed
 ```

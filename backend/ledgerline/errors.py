@@ -19,12 +19,15 @@ class AppError(Exception):
         *,
         status_code: int = 400,
         details: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.status_code = status_code
         self.details = details or {}
+        # Response headers the error needs to be actionable, e.g. Retry-After.
+        self.headers = headers or {}
 
 
 # --- Authentication / authorisation -----------------------------------------
@@ -58,5 +61,14 @@ def validation_error(message: str, details: dict[str, Any] | None = None) -> App
     return AppError("VALIDATION_ERROR", message, status_code=422, details=details)
 
 
-def rate_limited(message: str = "Too many requests. Please slow down.") -> AppError:
-    return AppError("RATE_LIMITED", message, status_code=429)
+def rate_limited(
+    message: str = "Too many requests. Please slow down.", retry_after_seconds: int = 60
+) -> AppError:
+    # 429 without Retry-After tells a client to back off but not how long, which
+    # invites a retry storm. The window is one minute, so that is the advice.
+    return AppError(
+        "RATE_LIMITED",
+        message,
+        status_code=429,
+        headers={"Retry-After": str(retry_after_seconds)},
+    )

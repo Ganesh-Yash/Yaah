@@ -110,6 +110,8 @@ Most of the defects below were found that way.
 
 | G28 | `scripts/seed.py` building `Database(...)` directly | It ignored `LEDGERLINE_DATABASE_URL`, so on a PostgreSQL deployment it seeded a local SQLite file and the API started against an empty database. Caught only by running the real thing: the seeded demo users could not log in through the Postgres-backed API | Used `Settings.from_env()` + `make_database()`, print the backend and target, and added a test that seeds through the script and reads the users back from the configured engine |
 
+| G29 | `rate_limited()` returning a bare `429` | No `Retry-After`, and `AppError` had no way to carry response headers at all — so a throttled client could only guess how long to wait, which usually means retrying immediately. Found by hitting the live limit with 36 rapid requests and looking at the response headers, not by reading the code | Added a `headers` field to `AppError`, forwarded it in the exception handler, and set `Retry-After: 60` on both the money throttle and the login throttle; two tests pin the header |
+
 G26 is the one I want to highlight: the failure mode of AI-written documentation is not a typo, it is
 a confident sentence describing code that was never written. The only defence I found is to grep for
 the implementation of every security claim before committing the paragraph.
