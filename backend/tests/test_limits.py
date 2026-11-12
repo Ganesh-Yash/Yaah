@@ -217,3 +217,49 @@ class TestRateLimitResponsesAreActionable:
                 break
         assert response is not None and response.status_code == 429, "the login throttle never triggered"
         assert response.headers.get("Retry-After") == "60"
+
+class TestAMisconfiguredCacheDoesNotTakeTheBankDown:
+    """Redis is optional (decision D13: the limiter fails open).
+
+    The first real Render deploy died with `ValueError: Redis URL must specify one
+    of the following schemes` — a URL pasted with its surrounding quotes — raised
+    from inside `create_app`. An optional cache being wrong must degrade the
+    deployment, never stop it.
+    """
+
+    def test_quotes_around_the_url_are_stripped(self, monkeypatch):
+        """A dashboard paste arrives with quotes more often than without."""
+        from ledgerline.config import Settings
+
+        monkeypatch.setenv("LEDGERLINE_REDIS_URL", '"rediss://default:pw@example.upstash.io:6379"')
+        monkeypatch.setenv("LEDGERLINE_DATABASE_URL", '  "postgresql://u:p@h/db?sslmode=require"  ')
+        settings = Settings.from_env()
+
+        assert settings.redis_url == "rediss://default:pw@example.upstash.io:6379"
+        assert settings.database_url == "postgresql://u:p@h/db?sslmode=require"
+
+    def test_a_malformed_url_disables_the_limiter_instead_of_raising(self):
+        from ledgerline.config import Settings
+        from ledgerline.limiter import make_redis_client
+
+        settings = Settings(env="test", redis_url="steady-albacore-199338.upstash.io:6379")
+        assert make_redis_client(settings) is None
+
+    def test_the_app_still_boots_and_reports_redis_disabled(self, tmp_path):
+        from fastapi.testclient import TestClient
+
+        from ledgerline.config import Settings
+        from ledgerline.main import create_app
+
+        settings = Settings(
+            env="test",
+            database_path=str(tmp_path / "bad-redis.db"),
+            redis_url='"rediss://"',  # parses to an empty host
+        )
+        with TestClient(create_app(settings)) as client:
+            health = client.get("/api/health")
+            assert health.status_code == 200
+            assert health.json()["checks"]["redis"]["state"] == "disabled"
+            # And the bank works: nothing here depends on Redis.
+            assert client.get("/api/ready").status_code == 200
+

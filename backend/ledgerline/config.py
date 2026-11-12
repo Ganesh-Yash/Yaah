@@ -39,6 +39,22 @@ def _env_list(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(item.strip() for item in raw.split(",") if item.strip())
 
 
+def _env_url(name: str) -> str | None:
+    """Read a URL, tolerating what a dashboard paste actually delivers.
+
+    Pasting a connection string into a hosting dashboard very often carries the
+    surrounding quotes (``"rediss://..."``) or a trailing newline. Both produce a
+    URL whose scheme is not what the parser expects, and the resulting error is
+    about a scheme rather than about the quotes — which sends people looking at
+    the wrong thing. Strip whitespace and one matching pair of quotes; leave
+    everything else untouched.
+    """
+    raw = (os.environ.get(name) or "").strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {'"', "'"}:
+        raw = raw[1:-1].strip()
+    return raw or None
+
+
 def _platform_public_host() -> tuple[str, ...]:
     """Default Host allowlist, from the platform when it will tell us.
 
@@ -163,9 +179,9 @@ class Settings:
         settings = cls(
             env=os.environ.get("LEDGERLINE_ENV", "dev").strip().lower(),
             database_path=os.environ.get("LEDGERLINE_DATABASE_PATH", "./data/ledgerline.db"),
-            database_url=os.environ.get("LEDGERLINE_DATABASE_URL") or None,
+            database_url=_env_url("LEDGERLINE_DATABASE_URL"),
             database_schema=os.environ.get("LEDGERLINE_DATABASE_SCHEMA") or None,
-            redis_url=os.environ.get("LEDGERLINE_REDIS_URL") or None,
+            redis_url=_env_url("LEDGERLINE_REDIS_URL"),
             jwt_secret=os.environ.get("LEDGERLINE_JWT_SECRET", ""),
             jwt_issuer=os.environ.get("LEDGERLINE_JWT_ISSUER", "ledgerline"),
             jwt_audience=os.environ.get("LEDGERLINE_JWT_AUDIENCE", "ledgerline-api"),
