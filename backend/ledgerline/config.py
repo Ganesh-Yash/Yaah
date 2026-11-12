@@ -39,6 +39,20 @@ def _env_list(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(item.strip() for item in raw.split(",") if item.strip())
 
 
+def _platform_public_host() -> tuple[str, ...]:
+    """Default Host allowlist, from the platform when it will tell us.
+
+    Render injects ``RENDER_EXTERNAL_HOSTNAME`` (e.g. ``balancevault.onrender.com``)
+    into every service. Without that default a fresh deploy rejects every request
+    with "Invalid host header" unless the operator guesses the value exactly, and
+    the allowlist is also what switches on reading ``X-Forwarded-For`` for the
+    per-IP login throttle — so getting it wrong is both a 400 and a security
+    regression. Explicit ``LEDGERLINE_TRUSTED_HOSTS`` still wins.
+    """
+    host = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "").strip().lower()
+    return (host,) if host else ()
+
+
 @dataclass(frozen=True)
 class Settings:
     """Immutable application settings.
@@ -179,7 +193,7 @@ class Settings:
             sqlite_busy_timeout_ms=_env_int("LEDGERLINE_SQLITE_BUSY_TIMEOUT_MS", 10_000),
             static_dir=os.environ.get("LEDGERLINE_STATIC_DIR") or None,
             demo_seed_enabled=_env_bool("LEDGERLINE_DEMO_SEED", False),
-            trusted_hosts=_env_list("LEDGERLINE_TRUSTED_HOSTS", ()),
+            trusted_hosts=_env_list("LEDGERLINE_TRUSTED_HOSTS", _platform_public_host()),
             csp_frame_ancestors=os.environ.get("LEDGERLINE_CSP_FRAME_ANCESTORS") or None,
         )
         if settings.is_dev_secret:
