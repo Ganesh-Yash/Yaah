@@ -182,7 +182,7 @@ That run is also how defect G28 was found: the seed script ignored the database 
 local SQLite file, so the API started empty. The fix and its regression test are in
 `tests/test_bootstrap.py::TestSeedScriptUsesTheConfiguredBackend`.
 
-## 7. What was *not* verified
+## 8. What was *not* verified
 
 Stated plainly, because the README does not claim it:
 
