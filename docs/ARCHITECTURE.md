@@ -132,7 +132,8 @@ an automated client.
 
 ## Concurrency model
 
-SQLite allows one writer at a time. The design leans into that instead of fighting it:
+Both engines are configured for one writer at a time. The design leans into that instead of
+fighting it:
 
 1. Every write enters through `db.write()`, which issues `BEGIN IMMEDIATE` — the write lock is taken
    before the first read, so no transaction can be half-upgraded and no two can interleave.
@@ -144,6 +145,12 @@ SQLite allows one writer at a time. The design leans into that instead of fighti
    the writer.
 5. Legs are applied in ascending account-id order, which is the deadlock-avoidance discipline that
    carries over to Postgres.
+
+On PostgreSQL the same five rules hold with one primitive swapped: `db.write()` first takes
+`pg_advisory_xact_lock(4172911)`, a lock with exactly the lifetime `BEGIN IMMEDIATE` gives the SQLite
+transaction. Postgres *could* run two writers in parallel, but the daily-limit check reads before it
+posts, so parallel writers would turn a correct check into a TOCTOU race. Serialising the writer keeps
+one money code path instead of two, and the same six concurrency tests run against both engines.
 
 Measured behaviour (`tests/test_concurrency.py`, real uvicorn, real sockets, 2 vCPU sandbox): 20
 racing withdrawals finish with exactly 10 successes and a `0.00` balance; 40 opposite transfers
@@ -160,22 +167,95 @@ conserve the total exactly; 20 duplicate requests with one key produce one trans
 | Disk full during commit | Commit fails, transaction rolled back, `500`; no partial state |
 | Tampering with the database file | Balance recomputation or the hash chain fails; `/api/auditor/integrity` reports `ok: false` with the first bad id |
 
-## Porting to Postgres
+## Two engines, one interface
 
-The write path is deliberately shaped so the port is mechanical:
+The brief requires PostgreSQL. The test suite and the offline demo are much
+happier on SQLite. Rather than pick one, the application talks to a small
+interface with two implementations, and the choice is made from configuration:
 
-| Concern | SQLite (now) | Postgres |
+| | SQLite (`db.py`) | PostgreSQL (`pg.py`) |
 |---|---|---|
-| Write lock | `BEGIN IMMEDIATE` | `BEGIN` then `SELECT ... FOR UPDATE` on the account ids **in ascending order** (prevents deadlocks) |
-| Ledger ids | `chain_state.last_id + 1` | a real `SEQUENCE` (`nextval`), or keep `chain_state` with row locking |
-| Integers | `INTEGER` (64-bit) | `BIGINT` |
-| Timestamps | `TEXT` ISO-8601 UTC | `TIMESTAMPTZ` (hash the same canonical string form) |
-| Append-only | triggers with `RAISE(ABORT)` | a `BEFORE UPDATE OR DELETE` trigger with `RAISE EXCEPTION`, plus `REVOKE UPDATE, DELETE` from the app role |
-| Idempotency race | serialised by the single writer | `INSERT ... ON CONFLICT (user_id, scope, key) DO NOTHING`, then `SELECT ... FOR UPDATE` on the winner's row |
-| Conditional balance update | unchanged | unchanged — same SQL |
+| Selected by | no `LEDGERLINE_DATABASE_URL` | `LEDGERLINE_DATABASE_URL` set |
+| Write lock | `BEGIN IMMEDIATE` | `pg_advisory_xact_lock(4172911)` for the whole write |
+| Rows | `sqlite3.Row` | `PgRow` — a dict that also supports `row[0]` |
+| Placeholders | `?` | translated `?` → `%s` in one adapter method |
+| Append-only | triggers with `RAISE(ABORT)` | triggers with `RAISE EXCEPTION` |
+| Money | `INTEGER` minor units | `BIGINT` minor units |
+| Timestamps | `TEXT` ISO-8601 | `TEXT` ISO-8601 (same strings) |
+| Schema applied by | `schema.sql` | Prisma (`prisma migrate deploy`) |
 
-The important part is that the conditional `UPDATE` and the idempotency-in-one-transaction pattern do
-not change; only the locking primitive does.
+Two decisions in that table are worth defending:
+
+**One writer, still.** SQLite's `BEGIN IMMEDIATE` serialises every write; the
+conditional `UPDATE ... WHERE balance_minor + :delta >= 0` is correct *because*
+of that serialisation, not independently of it. Postgres would happily run two
+writers in parallel, and the daily-limit check (sum today's outflow, then post)
+would then be a TOCTOU race. So the Postgres writer takes a transaction-scoped
+advisory lock with the same lifetime as the SQLite transaction. The guarantee
+becomes "one writer at a time", which is exactly what the SQLite path already
+relies on, so both engines run the *same* money code with the *same* tests.
+
+**Timestamps stay TEXT.** Prisma would map `DateTime` to `timestamptz`. The
+application builds canonical ISO-8601 strings and hashes them into the chain;
+letting the driver format timestamps would put a second, subtly different
+representation in the hash input. Strings are stored verbatim on both engines,
+so a chain written on SQLite would verify on Postgres.
+
+The normalised SQL is deliberately boring: `ON CONFLICT DO NOTHING` instead of
+`INSERT OR IGNORE`, and the statement cursor predicate is assembled in Python
+instead of `(? IS NULL OR id < ?)`, because Postgres cannot infer the type of an
+untyped NULL parameter. Those two changes are the entire diff in the money path.
+
+## Schema ownership: Prisma, and only Prisma
+
+`prisma/` owns the PostgreSQL DDL:
+
+- `prisma/schema.prisma` — models for every table, money as `BigInt`, timestamps
+  as `String`, each model `@@map`ped to its real table name.
+- `prisma/migrations/20260101000000_init/migration.sql` — the DDL that creates
+  the schema, the append-only triggers, the `CHECK` constraints, and the seeded
+  `chain_state` / `schema_meta` rows.
+- `prisma/migrations/migration_lock.toml` — tells `prisma migrate deploy` the
+  provider, so the history is not guessed.
+
+The API never imports a Prisma client; Python owns runtime queries. Duplicating
+DDL by hand would let the two drift, so `tests/test_schema_parity.py` parses all
+three artefacts (Prisma schema, Postgres migration, SQLite `schema.sql`) and
+fails if tables or columns disagree. That test is the offline stand-in for
+`prisma validate`, which needs engine binaries this build environment could not
+download (see PROMPTS.md, G25).
+
+## Two database roles
+
+A single "owner" connection is the common shortcut and it means SQL injection
+that reaches the database can rewrite the ledger. `deploy/postgres/` splits it:
+
+| Role | Used by | Rights |
+|---|---|---|
+| `balancevault_migrator` | `prisma migrate deploy`, the admin bootstrap | owns the schema; full DDL |
+| `balancevault_app` | the API | `SELECT` on everything; `INSERT`/`UPDATE` only on `users`, `accounts`, `sessions`, `refresh_tokens`, `chain_state`; `INSERT`-only on `transactions`, `ledger_entries`, `audit_log`, `idempotency_keys`; `DELETE` only on `refresh_tokens` |
+
+The grants are not aspirational: `tests/test_db_roles.py` builds a throwaway
+database, applies the real files, and asserts that the application role gets
+`InsufficientPrivilege` on `UPDATE ledger_entries`, `DELETE FROM audit_log`,
+`TRUNCATE`, `CREATE TABLE` and `DROP TABLE`.
+
+## Rate limiting across workers
+
+`limiter.py` has two implementations behind `.allow(key)`:
+
+- in-process, a deque per key — correct for exactly one worker;
+- Redis, a sorted set per key, checked and incremented in a single Lua script.
+
+The second exists because the first silently multiplies the limit by the number
+of workers. The Lua script is what makes it correct: read-then-write from two
+processes would let both see "29 used" and both allow the thirtieth write.
+
+If Redis is unreachable the limiter **fails open** and logs once. The money
+invariants live in the database, so a cache outage must not become an outage —
+but the decision is stated in THREATS.md rather than left implicit. `/api/health`
+reports which backend is live, so an operator can see whether counters are
+actually shared.
 
 ## Deliberate non-goals
 

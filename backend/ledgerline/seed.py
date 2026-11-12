@@ -41,6 +41,14 @@ def bootstrap(db: Database) -> None:
 
 
 def seed_demo(db: Database, settings: Settings, password: str = DEMO_PASSWORD) -> dict[str, Any]:
+    # Demo accounts have a published password. Creating them in production would
+    # be a backdoor with a README entry, so this refuses outright: there is no
+    # environment variable that turns it back on in production.
+    if settings.is_prod:
+        raise RuntimeError(
+            "refusing to create demo accounts when LEDGERLINE_ENV=production; "
+            "use scripts/bootstrap_admin.py for the first admin instead"
+        )
     bootstrap(db)
     created: list[str] = []
     for email, full_name, role in DEMO_USERS:

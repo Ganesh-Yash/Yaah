@@ -117,3 +117,34 @@ class TestBootstrapCli:
         monkeypatch.setenv("LEDGERLINE_BOOTSTRAP_PASSWORD", PASSWORD)
         assert bootstrap.main(["--email", "env@example.com"]) == 0
         assert bootstrap.count_admins(db) == 1
+
+
+class TestDemoSeedIsRefusedInProduction:
+    """Demo users have a published password; they must never reach production."""
+
+    def test_seed_demo_refuses_in_prod(self, db):
+        from ledgerline.config import Settings
+        from ledgerline.seed import seed_demo
+
+        # Do not touch db.path: PostgresDatabase has none, and this test must
+        # mean the same thing on both engines.
+        prod = Settings(env="prod", jwt_secret="x" * 50)
+        with pytest.raises(RuntimeError) as excinfo:
+            seed_demo(db, prod)
+        assert "production" in str(excinfo.value)
+
+    def test_seed_demo_still_works_in_dev(self, db, settings):
+        from ledgerline.seed import seed_demo
+
+        result = seed_demo(db, settings)
+        assert result["created"]
+
+    def test_no_demo_user_exists_after_the_refusal(self, db):
+        from ledgerline.config import Settings
+        from ledgerline.seed import seed_demo
+
+        prod = Settings(env="prod", jwt_secret="x" * 50)
+        with pytest.raises(RuntimeError):
+            seed_demo(db, prod)
+        with db.read() as conn:
+            assert conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0

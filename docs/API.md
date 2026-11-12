@@ -57,8 +57,30 @@ client path fails loudly instead of returning HTML with a 200.
 ## Meta
 
 ### `GET /api/health`
+
+Dependency report for humans and for deployment checks. Never raises, never returns a DSN.
+
 ```json
-{"status": "ok", "service": "ledgerline-api", "version": "1.0.0", "database": "ok",
+{"status": "ok", "service": "ledgerline-api", "version": "1.0.0",
+ "database": "ok", "backend": "postgres", "time": "2026-11-07T13:43:51.717436Z",
+ "checks": {
+   "database": {"ok": true, "detail": "ok"},
+   "redis":    {"ok": true, "state": "ok", "detail": "shared limiter"},
+   "schema":   {"version": "2"}}}
+```
+
+`status` is `degraded` when the database is unreachable. `checks.redis.state` is `ok`, `disabled`
+(no `LEDGERLINE_REDIS_URL`, so the in-process limiter is in use) or `unavailable` (Redis is down and
+the limiter is failing open — see THREATS.md §8). `checks.schema.version` is the `schema_meta` row
+written by the migration, so a half-migrated deployment is visible.
+
+### `GET /api/ready`
+
+Readiness probe, not in the OpenAPI schema. `200` when the database answers and the schema is
+present; `503` with the same body otherwise.
+
+```json
+{"ready": true, "database": {"ok": true, "detail": "ok"}, "schema_version": "2",
  "time": "2026-11-07T13:43:51.717436Z"}
 ```
 
@@ -77,7 +99,10 @@ client path fails loudly instead of returning HTML with a 200.
 {"email": "new@example.com", "password": "at-least-12-chars", "full_name": "New User"}
 ```
 `201` → `{"user": {…, "role": "CUSTOMER"}}`. Always creates a CUSTOMER; extra fields (e.g. `role`) are
-rejected with `422`.
+rejected with `422`. This is the onboarding path: the role is not an input, so there is no field to
+tamper with. Staff accounts (`ADMIN`, `AUDITOR`) can only be created by an existing `ADMIN` via
+`POST /api/admin/users`, and the very first `ADMIN` comes from `scripts/bootstrap_admin.py` — there is
+no unauthenticated route that can create one.
 
 ### `POST /api/auth/login`
 ```json

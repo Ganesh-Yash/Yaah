@@ -1,31 +1,120 @@
 # Deployment
 
-The application is one process: FastAPI serves the JSON API **and** the built React app from the same
-origin, so there is no CORS surface and no second host to secure.
+Two shapes, same API:
 
-## Option 1 — Docker Compose
+- **SQLite, one container** — the shape the original demo used. FastAPI serves the JSON API **and** the
+  built React app from the same origin, so there is no CORS surface and no second host to secure.
+- **PostgreSQL + Redis, four containers** — the shape the brief asks for: Prisma owns the schema, the
+  API runs as a least-privilege database role, and rate-limit counters are shared.
 
-> **Status:** this is the option CI verifies. The development machine had no Docker daemon, so I
-> never started the container myself, but the "Docker image builds" job runs
-> `docker build -t ledgerline:ci .` on every push and is green on `main` — the multi-stage build
-> itself is known-good, not assumed. Option 2 is the path exercised end to end here (seeded, served,
-> attacked) and is backed by 167 tests plus a 27-check live attack suite.
+## The full stack (PostgreSQL + Redis + Prisma)
+
+> **Status:** the compose file was written and syntax-checked here but **not executed** — the build
+> environment has no Docker daemon. Every component was exercised individually instead: the Prisma
+> migration applied to PostgreSQL 16.2, the role/privilege files applied and attacked
+> (`backend/tests/test_db_roles.py`, 13 tests), the full API test suite against that server
+> (214 tests), and the Redis limiter against a real Redis (`backend/tests/test_redis_limiter.py`, 11
+> tests). The YAML is the only unexecuted part.
 
 ```bash
 cp .env.example .env
-# Edit .env: set LEDGERLINE_JWT_SECRET to 32+ random characters
-python -c 'import secrets; print(secrets.token_urlsafe(48))'   # paste this in
+# Fill in POSTGRES_PASSWORD, MIGRATOR_PASSWORD, APP_PASSWORD, JWT_SECRET
+python -c 'import secrets; print(secrets.token_urlsafe(48))'   # for each secret
 
-docker compose up --build -d
-docker compose logs -f app
-# http://localhost:8000  → dashboard,  /api/health → JSON,  /docs → OpenAPI UI
+docker compose -f deploy/docker-compose.yml up -d --build
+docker compose -f deploy/docker-compose.yml logs -f api
 ```
 
-The image is multi-stage: Node builds the SPA, then a slim Python image runs the API with the built
-assets. The container runs as an unprivileged user and keeps the database on a named volume.
+Startup order is encoded with `depends_on`, and it is not decoration:
 
-Seeding happens on first boot when `LEDGERLINE_DEMO_SEED=1` (the compose default). Set it to `0` for a
-clean deployment and create users through the API or `python scripts/seed.py`.
+| Step | Container | What it does | Why it must come first |
+|---|---|---|---|
+| 1 | `db`, `redis` | PostgreSQL 16, Redis 7 (AOF on) | nothing can start without them |
+| 2 | `migrate` | `prisma migrate deploy` as `balancevault_migrator` | the tables must exist |
+| 3 | `grants` | apply `01-roles.sql` then `02-grants.sql` | per-table grants need the tables |
+| 4 | `api` | uvicorn as `balancevault_app` | it must not start before it can read |
+
+### First admin
+
+There is deliberately no unauthenticated "create the first admin" endpoint. The one-time step is a
+script:
+
+```bash
+docker compose -f deploy/docker-compose.yml --profile bootstrap run --rm bootstrap \
+    --email you@example.com --name "Ops Admin" --print-token
+```
+
+It prints a generated one-time password (the only time it is available), writes
+`ADMIN_BOOTSTRAPPED` into the hash-chained audit log, and **refuses to run again** once any admin
+exists. `--force` is available for a deliberate second admin; `--password-stdin` and
+`LEDGERLINE_BOOTSTRAP_PASSWORD` avoid the prompt in automation. The password is never taken from
+argv, because argv shows up in `ps` and shell history.
+
+Then:
+
+```bash
+curl -s localhost:8000/api/health | python -m json.tool    # dependency report
+curl -s -o /dev/null -w '%{http_code}\n' localhost:8000/api/ready   # 200 when ready
+```
+
+## Prisma migrations
+
+`prisma/` owns the PostgreSQL DDL; the API never issues DDL. Standard workflow on a machine with
+network access (the build environment for this submission could not download Prisma's engine
+binaries — see PROMPTS.md, G25):
+
+```bash
+cd prisma
+npm install                       # installs the prisma CLI
+export DATABASE_URL="postgresql://balancevault_migrator:...@host:5432/balancevault"
+npx prisma migrate status         # what is applied vs what is pending
+npx prisma migrate deploy         # apply pending migrations (production-safe)
+npx prisma migrate dev --name X   # author a new migration (development only)
+npx prisma validate               # schema sanity check
+```
+
+Two rules that keep this honest:
+
+1. **Never edit an applied migration.** Add a new one; `migrate deploy` compares checksums.
+2. **Only the migrator role runs these.** The API's role has no `CREATE`, so a bug in the API cannot
+   change the schema even if it wanted to.
+
+`backend/tests/test_schema_parity.py` fails if `schema.prisma`, the migration SQL and the SQLite
+`schema.sql` disagree about tables or columns — that is the offline guard against drift.
+
+## Database roles
+
+`deploy/postgres/01-roles.sql` creates the two roles; `02-grants.sql` grants per table. The split is
+the point:
+
+| Role | Used by | Rights |
+|---|---|---|
+| `balancevault_migrator` | `prisma migrate deploy`, the admin bootstrap | owns `public`; full DDL |
+| `balancevault_app` | the running API | `SELECT` on all tables; `INSERT`/`UPDATE` on `users`, `accounts`, `sessions`, `refresh_tokens`, `chain_state`; `INSERT` only on `transactions`, `ledger_entries`, `audit_log`, `idempotency_keys`; `DELETE` only on `refresh_tokens` |
+
+Consequence, and the reason for the split: SQL injection that reaches the database as the app role
+**cannot** `UPDATE ledger_entries`, `DELETE FROM audit_log`, `TRUNCATE` or `DROP TABLE`. That is not a
+claim in a document — `backend/tests/test_db_roles.py` asserts each of those refusals against a real
+server.
+
+Re-running `02-grants.sql` after a migration is safe and is the recommended habit: new tables start
+readable-but-not-writable for the app (`ALTER DEFAULT PRIVILEGES`), so a forgotten grant fails closed.
+
+## Redis
+
+Set `LEDGERLINE_REDIS_URL` (e.g. `redis://redis:6379/0`) and both throttles — per-user money writes
+and per-IP login attempts — move from process memory into Redis, where they are shared by every
+worker. The check and the increment happen in one Lua script, so two workers cannot both see
+"29 used" and both allow the thirtieth write.
+
+If Redis is unreachable the limiter **fails open** and logs once; `/api/health` reports
+`checks.redis.state = "unavailable"`. Reasoning is in THREATS.md §8: the money invariants live in the
+database, so a cache outage must not stop the bank. If your risk appetite prefers fail-closed, that is
+a one-line change in `RedisSlidingWindowLimiter.allow` — and it should be a conscious choice, which is
+why it is written down here.
+
+Redis holds only timestamps. There is nothing in it worth backing up; AOF is enabled so a restart does
+not reset everyone's budget.
 
 ## Option 2 — bare metal / a VM
 
@@ -106,7 +195,11 @@ bucket. Behind a proxy, set it.
 |---|---|---|
 | `LEDGERLINE_ENV` | `dev` | `prod` refuses to boot without a ≥32-char JWT secret and enables HSTS |
 | `LEDGERLINE_JWT_SECRET` | ephemeral in dev | signing key; rotating it logs everyone out |
-| `LEDGERLINE_DATABASE_PATH` | `./data/ledgerline.db` | SQLite file (directory is created) |
+| `LEDGERLINE_DATABASE_PATH` | `./data/ledgerline.db` | SQLite file (directory is created); ignored when a URL is set |
+| `LEDGERLINE_DATABASE_URL` | unset | `postgresql://…` selects PostgreSQL. Unset = SQLite |
+| `LEDGERLINE_DATABASE_SCHEMA` | unset | Postgres schema for the connection (per-test isolation uses this) |
+| `LEDGERLINE_REDIS_URL` | unset | `redis://…` shares rate-limit counters across workers |
+| `LEDGERLINE_BOOTSTRAP_PASSWORD` | unset | password for `scripts/bootstrap_admin.py` in automation |
 | `LEDGERLINE_DAILY_OUTFLOW_LIMIT_MINOR` | `100000000` (1,000,000.00) | per-account ceiling on withdrawals + outgoing transfers per UTC day; `0` disables |
 | `LEDGERLINE_MAX_REQUEST_BYTES` | `65536` | request body cap, enforced on the byte stream (chunked uploads included) |
 | `LEDGERLINE_CSP_FRAME_ANCESTORS` | `'none'` in prod, `*` in dev | set to `'self'` if you need to embed the dashboard yourself |
@@ -174,7 +267,15 @@ systemctl restart ledgerline
 
 ## Health, monitoring and logs
 
-- Liveness/readiness: `GET /api/health` (checks the database with `SELECT 1`).
+- **Liveness:** `GET /api/health` — never raises, reports database reachability, the live backend
+  (`sqlite`/`postgres`), the limiter backend (`redis`/`in-process`) and the applied schema version.
+- **Readiness:** `GET /api/ready` — `200` only when the database answers *and* the schema is present;
+  `503` otherwise. This is the probe a load balancer should use, and what the container
+  `HEALTHCHECK` calls: a pod that cannot reach its database must not receive traffic.
+- **Redis is deliberately not a readiness condition.** A Redis outage degrades rate limiting (the
+  limiter fails open) but the API still serves correctly, so marking the service unready would remove
+  healthy capacity during a cache incident. It is reported by `/api/health` instead — monitor
+  `checks.redis.state` and alert on `unavailable`.
 - Structured-ish logs on stderr with one line per request from uvicorn, plus `[ledgerline]` boot lines
   and `unhandled error [req_…]` entries that pair with the `request_id` a user quotes.
 - Business events are **not** in the logs, they are in the audit table (`GET /api/audit`), which is
@@ -194,18 +295,37 @@ curl -s https://host/api/auditor/integrity -H "Authorization: Bearer $TOKEN" \
   | jq -e '.ok == true' > /dev/null || echo "LEDGER INTEGRITY FAILURE" | mail -s alert ops@example.com
 ```
 
-## Moving to Postgres
+## Moving from SQLite to PostgreSQL
 
-Not shipped, but the port is small and deliberate:
+The migration is a configuration change plus one DDL run; no application code changes.
 
-1. Replace `db.py` with a psycopg connection pool; `BEGIN IMMEDIATE` becomes `BEGIN` plus
-   `SELECT … FROM accounts WHERE id = ANY(%s) ORDER BY id FOR UPDATE`.
-2. `INTEGER` → `BIGINT`, ISO strings → `TIMESTAMPTZ` (hash the same canonical strings).
-3. `AUTOINCREMENT`-style ids come from a sequence instead of `chain_state.last_id`.
-4. Idempotency insert becomes `INSERT … ON CONFLICT (user_id, scope, key) DO NOTHING` followed by
-   `SELECT … FOR UPDATE` of the winning row.
-5. Triggers become `RAISE EXCEPTION`; also `REVOKE UPDATE, DELETE` on the history tables from the
-   application role, so the guarantee survives a bug in the app.
+```bash
+# 1. provision PostgreSQL and create the roles
+psql "$ADMIN_URL" -f deploy/postgres/01-roles.sql
 
-`docs/ARCHITECTURE.md#porting-to-postgres` has the SQL notes, and the concurrency tests are written
-against HTTP, so they carry over unchanged.
+# 2. apply the schema as the migrator
+cd prisma && DATABASE_URL="$MIGRATOR_URL" npx prisma migrate deploy
+
+# 3. grant the app role its per-table privileges
+psql "$ADMIN_URL" -f deploy/postgres/02-grants.sql
+
+# 4. create the first admin (SQLite demo data does not travel)
+cd ../backend && LEDGERLINE_DATABASE_URL="$MIGRATOR_URL" \
+    python -m scripts.bootstrap_admin --email you@example.com --print-token
+
+# 5. point the API at the app role
+export LEDGERLINE_DATABASE_URL="postgresql://balancevault_app:...@host/balancevault"
+uvicorn ledgerline.main:app --port 8000
+```
+
+Existing rows are not migrated by these files: this deployment starts empty. If you do need to move
+existing ledgers, copy `users`, `accounts`, `transactions`, `ledger_entries`, `audit_log` and
+`chain_state`, keep `id` values, then re-run the auditor (`GET /api/auditor/integrity`) — the hash
+chain is computed over canonical strings and verifies identically on both engines, which is exactly
+why timestamps are stored as `TEXT` rather than `timestamptz`.
+
+Rollout advice: run the full suite against the target server before switching —
+
+```bash
+LEDGERLINE_TEST_DATABASE_URL="$APP_URL" pytest -q     # 214 passed
+```
