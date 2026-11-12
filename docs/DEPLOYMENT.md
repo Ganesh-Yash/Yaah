@@ -192,6 +192,10 @@ exists for exactly this case:
    `LEDGERLINE_DATABASE_URL` (same value as the service) and `LEDGERLINE_BOOTSTRAP_PASSWORD` (the password
    you want this admin to have).
 2. **Actions → Create admin → Run workflow**, type your email, run it.
+   *This button only appears once the workflow file exists on the repository's default branch* — GitHub runs
+   manual-dispatch workflows from `main`, not from a feature branch. On an unmerged branch, copy
+   `.github/workflows/create-admin.yml` to `main` first (the web UI's "Add file → Create new file" is
+   enough), or use the local script above instead.
 3. Read the job log: `Created admin you@example.com (...) on postgres`. The password is never printed —
    this repository is public, so run logs are too, which is why it comes from a secret instead.
 
