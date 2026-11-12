@@ -68,6 +68,11 @@ def test_blueprint_declares_one_docker_service(blueprint):
     # The plan must be *stated*. Render defaults to a paid instance type when the
     # key is absent, so omitting it silently turns a free deploy into a bill.
     assert service["plan"] in {"free", "starter"}
+    # Same trap, different consequence: this key decides which commit is built,
+    # and the dashboard's branch picker does not override it. A blueprint that
+    # deploys a branch without the code it was configured for is worse than no
+    # blueprint — every setting looks right and the deployed image is older.
+    assert service["branch"], "the deployed branch must be stated explicitly"
     assert service["region"] == "singapore"
 
 

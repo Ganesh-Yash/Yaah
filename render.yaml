@@ -5,9 +5,13 @@
 # Two things to set before you click Apply:
 #
 #   branch  Render deploys from a git branch, not from a local directory (that is
-#           the main difference from Fly). Point this at the branch you want live;
-#           `main` is the default, so a branch that is not merged yet must be named
-#           here, or be promoted to main first.
+#           the main difference from Fly) — and `branch:` below is what it obeys.
+#           This value, not the branch picker in the dashboard, decides which
+#           commit is built: a blueprint whose picker said one branch still
+#           deployed `main` because this line said `main`, and the deploy then ran
+#           code that had none of the features configured above it. Change this
+#           line when the target changes (e.g. to `main` once this work is
+#           merged), then sync the blueprint.
 #   region  `singapore` because Neon has no India region and Upstash/Render/Fly
 #           all do have Singapore. Keep the database in the same region: a
 #           cross-region database costs ~50 ms *per query*, and one transfer is
@@ -30,7 +34,7 @@ services:
     runtime: docker
     dockerfilePath: ./Dockerfile
     dockerContext: .
-    branch: main
+    branch: arena/686afbca-yaah
     region: singapore
     plan: free
     # 200 only when the database answers AND the schema is present — not merely
