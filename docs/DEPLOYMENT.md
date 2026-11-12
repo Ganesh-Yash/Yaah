@@ -132,6 +132,15 @@ Three Render behaviours would break this image if nothing was done about them, s
 | Not every plan has a pre-deploy command | the entrypoint runs `python -m scripts.migrate` before uvicorn, under `set -eu`, so a failed migration aborts the boot instead of serving against a missing schema |
 | The only stable hostname is `RENDER_EXTERNAL_HOSTNAME` | it is used as the default `LEDGERLINE_TRUSTED_HOSTS`, which also enables reading `X-Forwarded-For` for the per-IP login throttle |
 
+**Which branch is deployed.** `branch:` inside `render.yaml` — not the branch picker in
+the dashboard — is what Render builds. This has already bitten once: a blueprint created
+from the right branch still deployed `main`, because the file said `branch: main`, so the
+service came up with every setting correct and none of the code those settings were for.
+Change that line when the target moves (to `main` after a merge, for example), then
+**Blueprints → Sync** and redeploy. Recognising the symptom takes one glance: a build from
+`main` starts its log with `INFO: Started server process`, while a build of this branch
+starts with `[migrate] target: ...`.
+
 **Cost.** The blueprint is the zero-cost configuration — Render `free` + Neon `free` + Upstash `free`,
 no card needed on any of the three. Three consequences follow, and they are stated here rather than
 discovered during a demo:
