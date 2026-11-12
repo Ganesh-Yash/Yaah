@@ -24,6 +24,9 @@ COPY backend/requirements.txt ./backend/requirements.txt
 RUN pip install --no-cache-dir -r backend/requirements.txt
 
 COPY backend/ ./backend/
+# The migration SQL ships with the image so the release step (scripts.migrate)
+# can bootstrap an empty database. pg.py resolves it at /app/prisma/migrations.
+COPY prisma/ ./prisma/
 COPY --from=frontend /build/frontend/dist ./frontend/dist
 
 # Unprivileged runtime user; /data is the only writable path it needs.
@@ -34,10 +37,14 @@ USER ledger
 
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD python -c "import urllib.request,sys; \
-sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).status == 200 else 1)"
+# The port is whatever the platform injects (Render assigns one dynamically),
+# falling back to 8000 for Fly and plain `docker run`.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD python -c "import os,urllib.request,sys; \
+url='http://127.0.0.1:'+os.environ.get('PORT','8000')+'/api/health'; \
+sys.exit(0 if urllib.request.urlopen(url, timeout=3).status == 200 else 1)"
 
 WORKDIR /app/backend
+# scripts/start.sh migrates the database, then execs uvicorn on $PORT.
 # One worker on purpose: SQLite has a single writer. See docs/DEPLOYMENT.md.
-CMD ["uvicorn", "ledgerline.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+CMD ["sh", "/app/backend/scripts/start.sh"]

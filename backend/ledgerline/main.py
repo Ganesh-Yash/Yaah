@@ -178,7 +178,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.exception_handler(AppError)
     async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
-        headers = {}
+        headers = dict(exc.headers)
         if exc.status_code == 401:
             headers["WWW-Authenticate"] = "Bearer"
         return JSONResponse(

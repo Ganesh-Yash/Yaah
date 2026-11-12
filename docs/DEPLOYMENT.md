@@ -13,7 +13,7 @@ Two shapes, same API:
 > environment has no Docker daemon. Every component was exercised individually instead: the Prisma
 > migration applied to PostgreSQL 16.2, the role/privilege files applied and attacked
 > (`backend/tests/test_db_roles.py`, 13 tests), the full API test suite against that server
-> (215 tests), and the Redis limiter against a real Redis (`backend/tests/test_redis_limiter.py`, 11
+> (239 tests), and the Redis limiter against a real Redis (`backend/tests/test_redis_limiter.py`, 11
 > tests). The YAML is the only unexecuted part.
 
 ```bash
@@ -81,6 +81,155 @@ Two rules that keep this honest:
 
 `backend/tests/test_schema_parity.py` fails if `schema.prisma`, the migration SQL and the SQLite
 `schema.sql` disagree about tables or columns — that is the offline guard against drift.
+
+### Migrations on deploy
+
+The API runs as a role with no DDL rights, so the schema is applied by a **release step**, not by the
+app on startup:
+
+```bash
+cd backend && python -m scripts.migrate          # or: make migrate
+```
+
+| Platform | Where the command goes |
+|---|---|
+| Fly.io | `[deploy] release_command = "python -m scripts.migrate"` (see `fly.toml.example`) |
+| Render | nothing to configure: `scripts/start.sh` migrates on boot. A paid instance may use
+`preDeployCommand` instead, with `LEDGERLINE_SKIP_STARTUP_MIGRATION=1` |
+| Docker Compose | the `migrate` service already does this (`prisma migrate deploy`) |
+
+Behaviour, and why it is safe to run on every deploy:
+
+- **Empty database** → applies `prisma/migrations/*/migration.sql` and confirms `schema_meta.version`.
+- **Schema already present** → changes nothing and prints the version (idempotent).
+- **No target configured** → exits `1`, so the platform stops the deploy instead of starting the API
+  against a database it cannot use.
+
+`LEDGERLINE_MIGRATION_DATABASE_URL` (optional) lets the release step connect with the **migrator**
+credential while the API keeps `LEDGERLINE_DATABASE_URL` as the **application** role. Unset, both use
+the same URL.
+
+> **What this script does not do:** it does not maintain its own migration ledger. Prisma owns
+> `_prisma_migrations`, and a private hand-rolled table would make a later `prisma migrate deploy`
+> believe nothing had been applied and re-run the initial migration. So `scripts.migrate` bootstraps an
+> empty database (the fresh-deploy case); once a deployment is live, schema changes go through
+> `prisma migrate deploy` — the workflow in the section above.
+
+The runtime image ships `prisma/migrations` for exactly this reason (`COPY prisma/ ./prisma/` in the
+root `Dockerfile`), because `pg.py` resolves the directory at `/app/prisma/migrations`.
+
+## Deploying on Render
+
+`render.yaml` in the repository root is a Blueprint: **New + → Blueprint → pick this repository → Apply**.
+It declares one Docker web service — the API serves the built SPA itself, so there is no second service
+and no CORS surface.
+
+Three Render behaviours would break this image if nothing was done about them, so the repo handles them:
+
+| Render behaviour | What the repo does |
+|---|---|
+| The port is assigned dynamically in `$PORT` | `scripts/start.sh` runs uvicorn on `${PORT:-8000}`, and the Dockerfile health check reads the same variable. A hardcoded 8000 gives a 502 from the load balancer while the process log looks healthy |
+| Not every plan has a pre-deploy command | the entrypoint runs `python -m scripts.migrate` before uvicorn, under `set -eu`, so a failed migration aborts the boot instead of serving against a missing schema |
+| The only stable hostname is `RENDER_EXTERNAL_HOSTNAME` | it is used as the default `LEDGERLINE_TRUSTED_HOSTS`, which also enables reading `X-Forwarded-For` for the per-IP login throttle |
+
+**Which branch is deployed.** `branch:` inside `render.yaml` — not the branch picker in
+the dashboard — is what Render builds. This has already bitten once: a blueprint created
+from the right branch still deployed `main`, because the file said `branch: main`, so the
+service came up with every setting correct and none of the code those settings were for.
+Change that line when the target moves (to `main` after a merge, for example), then
+**Blueprints → Sync** and redeploy. Recognising the symptom takes one glance: a build from
+`main` starts its log with `INFO: Started server process`, while a build of this branch
+starts with `[migrate] target: ...`.
+
+**Cost.** The blueprint is the zero-cost configuration — Render `free` + Neon `free` + Upstash `free`,
+no card needed on any of the three. Three consequences follow, and they are stated here rather than
+discovered during a demo:
+
+- **Cold start.** A free web service spins down after 15 minutes without traffic, and the next request
+  spends about a minute waking it (Render shows its own loading page meanwhile). Open the URL once before
+  a demo, or switch the service to `starter` (~$7/month) in the dashboard and the sleep disappears. The
+  750 instance-hours per month only run out if something keeps the service permanently awake.
+- **No Shell and no one-off jobs.** So `bootstrap_admin` cannot be run from inside Render — it runs from
+  your machine or from a GitHub Actions job instead. Both are below.
+- **No free Render Postgres.** It expires 30 days after creation and is deleted 14 days later, taking the
+  ledger with it. Use **Neon** `free` (`aws-ap-southeast-1`, same region, `?sslmode=require`) for
+  PostgreSQL and **Upstash** `free` (`ap-southeast-1`, `rediss://`) for Redis. Neither expires.
+
+```bash
+# 1. Neon (console.neon.tech): project in AWS ap-southeast-1. Copy the DIRECT
+#    connection string (not the -pooler host) and append ?sslmode=require
+# 2. Upstash (console.upstash.com): Redis in ap-southeast-1, TLS on; copy rediss://
+# 3. Render: New + → Blueprint → this repository
+#      branch:  the branch you want live — Render deploys git, not a working dir
+#      region:  singapore
+#    Enter LEDGERLINE_DATABASE_URL and LEDGERLINE_REDIS_URL when prompted.
+```
+
+Then open `https://<name>.onrender.com/api/health`: `backend: postgres` and
+`checks.schema.version: "2"` mean the release step did its job.
+
+### First admin when there is no Shell
+
+`bootstrap_admin` is a script, not an endpoint (decision D14), and a free instance offers nowhere to run
+it. Two options — the first leaves no known credentials behind:
+
+**From your own machine**, after the first successful deploy (that is what creates the schema):
+
+```bash
+cd backend
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+LEDGERLINE_DATABASE_URL="postgresql://...neon.tech/balancevault?sslmode=require" \
+  .venv/bin/python -m scripts.bootstrap_admin --email you@example.com --print-token
+```
+
+It prints a one-time password; the script refuses to run again once an admin exists, and the creation is
+written into the audit chain as a `SYSTEM` event.
+
+**Without Python on your machine — a one-off GitHub Actions job.** `.github/workflows/create-admin.yml`
+exists for exactly this case:
+
+1. GitHub → this repository → **Settings → Secrets and variables → Actions → New repository secret**, twice:
+   `LEDGERLINE_DATABASE_URL` (same value as the service) and `LEDGERLINE_BOOTSTRAP_PASSWORD` (the password
+   you want this admin to have).
+2. **Actions → Create admin → Run workflow**, type your email, run it.
+   *This button only appears once the workflow file exists on the repository's default branch* — GitHub runs
+   manual-dispatch workflows from `main`, not from a feature branch. On an unmerged branch, copy
+   `.github/workflows/create-admin.yml` to `main` first (the web UI's "Add file → Create new file" is
+   enough), or use the local script above instead.
+3. Read the job log: `Created admin you@example.com (...) on postgres`. The password is never printed —
+   this repository is public, so run logs are too, which is why it comes from a secret instead.
+
+> **`LEDGERLINE_DEMO_SEED` cannot be used here.** It is a real setting, but `seed_demo()` raises outright
+> when `LEDGERLINE_ENV=prod` — deliberately, since the demo accounts have a password published in this
+> repository, and there is no variable that turns the guard off. A deploy that sets it crash-loops with
+> `RuntimeError: refusing to create demo accounts when LEDGERLINE_ENV=production`. (This documentation
+> claimed otherwise for a while; see PROMPTS.md G36.)
+
+### First-deploy failures, and what they actually mean
+
+All four of these happened on the first real Render deploys of this repository:
+
+| Log line | Cause | Fix |
+|---|---|---|
+| `LEDGERLINE_JWT_SECRET must be set to at least 32 characters in prod` | the service was created by hand instead of from `render.yaml`, so nothing generated the secret | add `LEDGERLINE_JWT_SECRET` yourself, 32+ characters |
+| `ValueError: Redis URL must specify one of the following schemes (redis://, rediss://, unix://)` | the value was pasted **with its surrounding quotes** (`"rediss://..."`), so the scheme read `"rediss` | quotes and stray whitespace are now stripped on load, and a URL that still does not parse degrades the limiter instead of stopping the app (G34) |
+| Deploy log has no `[migrate]` line and no `COPY prisma/ ./prisma/` step | the build came from a branch without the release step — `main` | set the service's branch to the one carrying this work, then redeploy |
+| `RuntimeError: refusing to create demo accounts when LEDGERLINE_ENV=production` | `LEDGERLINE_DEMO_SEED` was set on a prod deployment, where seeding is refused by design | remove the variable; create the first admin with `bootstrap_admin` or the **Create admin** workflow |
+
+The third one is worth recognising instantly: once the container starts through
+`scripts/start.sh`, `[migrate] target: ...` is the *first* thing in the log. If the log
+begins with `INFO: Started server process`, the image is not this image.
+
+**Neon free and the health check.** A free Neon database suspends after ~5 idle minutes, and the monthly
+allowance is 100 compute-hours. On a free Render service nothing polls it while the service sleeps, so
+`healthCheckPath: /api/ready` is safe here: the database idles exactly when the site does, and the
+allowance is never threatened. This becomes a trap only if you add something that keeps the site warm —
+an uptime monitor or a keep-alive cron. At 0.25 CU for 730 hours that is ≈182 CU-h, so Neon would hit its
+cap near day 16 and suspend the database mid-judging. If you do add one, point the health check at
+`/api/health` (liveness, no query) or move the database to Neon Launch.
+
+Platform difference worth knowing: `fly deploy` ships your working tree, while Render deploys whatever
+is on the selected branch. Pick the branch in the dashboard, or merge first.
 
 ## Database roles
 
@@ -216,6 +365,7 @@ bucket. Behind a proxy, set it.
 | `LEDGERLINE_DATABASE_PATH` | `./data/ledgerline.db` | SQLite file (directory is created); ignored when a URL is set |
 | `LEDGERLINE_DATABASE_URL` | unset | `postgresql://…` selects PostgreSQL. Unset = SQLite |
 | `LEDGERLINE_DATABASE_SCHEMA` | unset | Postgres schema for the connection (per-test isolation uses this) |
+| `LEDGERLINE_MIGRATION_DATABASE_URL` | unset | credential the release step uses for DDL; defaults to `LEDGERLINE_DATABASE_URL` |
 | `LEDGERLINE_REDIS_URL` | unset | `redis://…` shares rate-limit counters across workers |
 | `LEDGERLINE_BOOTSTRAP_PASSWORD` | unset | password for `scripts/bootstrap_admin.py` in automation |
 | `LEDGERLINE_DAILY_OUTFLOW_LIMIT_MINOR` | `100000000` (1,000,000.00) | per-account ceiling on withdrawals + outgoing transfers per UTC day; `0` disables |
@@ -345,5 +495,5 @@ why timestamps are stored as `TEXT` rather than `timestamptz`.
 Rollout advice: run the full suite against the target server before switching —
 
 ```bash
-LEDGERLINE_TEST_DATABASE_URL="$APP_URL" pytest -q     # 215 passed
+LEDGERLINE_TEST_DATABASE_URL="$APP_URL" pytest -q     # 239 passed
 ```

@@ -1,0 +1,83 @@
+name: Create admin
+
+# A one-off, audited way to create an ADMIN when the deploy target has no shell
+# (free Render instances have none) and there is no Python on your machine.
+#
+# Actions → "Create admin" → Run workflow. Requires two repository secrets
+# (Settings → Secrets and variables → Actions):
+#
+#   LEDGERLINE_DATABASE_URL        the same URL the service uses
+#   LEDGERLINE_BOOTSTRAP_PASSWORD  the password you want this admin to have
+#
+# The password is never printed: this repository is public, so run logs are
+# public, and GitHub masks secret values in logs. The email you type into the
+# form *does* appear in the log — it is a login email, not a credential.
+#
+# The script this runs is not an endpoint: it needs database credentials, it
+# hard-codes the role to ADMIN, it refuses a second run unless `force` is
+# checked, and it appends a SYSTEM-actor entry to the audit chain.
+
+on:
+  workflow_dispatch:
+    inputs:
+      email:
+        description: "Admin email address"
+        required: true
+        type: string
+      name:
+        description: "Display name"
+        required: false
+        default: "System Administrator"
+        type: string
+      force:
+        description: "Create even if an admin already exists"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  bootstrap:
+    name: Create the first admin
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Check the secrets exist
+        env:
+          URL: ${{ secrets.LEDGERLINE_DATABASE_URL }}
+          PASSWORD: ${{ secrets.LEDGERLINE_BOOTSTRAP_PASSWORD }}
+        run: |
+          if [ -z "$URL" ]; then
+            echo "::error::Add the LEDGERLINE_DATABASE_URL repository secret first (Settings → Secrets and variables → Actions)."
+            exit 1
+          fi
+          if [ -z "$PASSWORD" ]; then
+            echo "::error::Add the LEDGERLINE_BOOTSTRAP_PASSWORD repository secret — that becomes this admin's password."
+            exit 1
+          fi
+
+      - name: Install runtime dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create the admin
+        env:
+          LEDGERLINE_DATABASE_URL: ${{ secrets.LEDGERLINE_DATABASE_URL }}
+          LEDGERLINE_BOOTSTRAP_PASSWORD: ${{ secrets.LEDGERLINE_BOOTSTRAP_PASSWORD }}
+          ADMIN_EMAIL: ${{ inputs.email }}
+          ADMIN_NAME: ${{ inputs.name }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          args=(--email "$ADMIN_EMAIL" --name "$ADMIN_NAME")
+          if [ "$FORCE" = "true" ]; then args+=(--force); fi
+          python -m scripts.bootstrap_admin "${args[@]}"

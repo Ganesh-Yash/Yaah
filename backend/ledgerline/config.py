@@ -39,6 +39,36 @@ def _env_list(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(item.strip() for item in raw.split(",") if item.strip())
 
 
+def _env_url(name: str) -> str | None:
+    """Read a URL, tolerating what a dashboard paste actually delivers.
+
+    Pasting a connection string into a hosting dashboard very often carries the
+    surrounding quotes (``"rediss://..."``) or a trailing newline. Both produce a
+    URL whose scheme is not what the parser expects, and the resulting error is
+    about a scheme rather than about the quotes — which sends people looking at
+    the wrong thing. Strip whitespace and one matching pair of quotes; leave
+    everything else untouched.
+    """
+    raw = (os.environ.get(name) or "").strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {'"', "'"}:
+        raw = raw[1:-1].strip()
+    return raw or None
+
+
+def _platform_public_host() -> tuple[str, ...]:
+    """Default Host allowlist, from the platform when it will tell us.
+
+    Render injects ``RENDER_EXTERNAL_HOSTNAME`` (e.g. ``balancevault.onrender.com``)
+    into every service. Without that default a fresh deploy rejects every request
+    with "Invalid host header" unless the operator guesses the value exactly, and
+    the allowlist is also what switches on reading ``X-Forwarded-For`` for the
+    per-IP login throttle — so getting it wrong is both a 400 and a security
+    regression. Explicit ``LEDGERLINE_TRUSTED_HOSTS`` still wins.
+    """
+    host = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "").strip().lower()
+    return (host,) if host else ()
+
+
 @dataclass(frozen=True)
 class Settings:
     """Immutable application settings.
@@ -149,9 +179,9 @@ class Settings:
         settings = cls(
             env=os.environ.get("LEDGERLINE_ENV", "dev").strip().lower(),
             database_path=os.environ.get("LEDGERLINE_DATABASE_PATH", "./data/ledgerline.db"),
-            database_url=os.environ.get("LEDGERLINE_DATABASE_URL") or None,
+            database_url=_env_url("LEDGERLINE_DATABASE_URL"),
             database_schema=os.environ.get("LEDGERLINE_DATABASE_SCHEMA") or None,
-            redis_url=os.environ.get("LEDGERLINE_REDIS_URL") or None,
+            redis_url=_env_url("LEDGERLINE_REDIS_URL"),
             jwt_secret=os.environ.get("LEDGERLINE_JWT_SECRET", ""),
             jwt_issuer=os.environ.get("LEDGERLINE_JWT_ISSUER", "ledgerline"),
             jwt_audience=os.environ.get("LEDGERLINE_JWT_AUDIENCE", "ledgerline-api"),
@@ -179,7 +209,7 @@ class Settings:
             sqlite_busy_timeout_ms=_env_int("LEDGERLINE_SQLITE_BUSY_TIMEOUT_MS", 10_000),
             static_dir=os.environ.get("LEDGERLINE_STATIC_DIR") or None,
             demo_seed_enabled=_env_bool("LEDGERLINE_DEMO_SEED", False),
-            trusted_hosts=_env_list("LEDGERLINE_TRUSTED_HOSTS", ()),
+            trusted_hosts=_env_list("LEDGERLINE_TRUSTED_HOSTS", _platform_public_host()),
             csp_frame_ancestors=os.environ.get("LEDGERLINE_CSP_FRAME_ANCESTORS") or None,
         )
         if settings.is_dev_secret:

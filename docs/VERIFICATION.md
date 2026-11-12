@@ -23,8 +23,8 @@ python -m pytest -q
 
 | Run | Command | Result | Wall clock |
 |---|---|---|---|
-| Linux container, SQLite | `pytest -q` | **201 passed, 14 skipped** | 24.1 s |
-| Linux container, **PostgreSQL 16.2** | `LEDGERLINE_TEST_DATABASE_URL=… pytest -q` | **215 passed** | 38.9 s |
+| Linux container, SQLite | `pytest -q` | **224 passed, 15 skipped** | 29.9 s |
+| Linux container, **PostgreSQL 16.2** | `LEDGERLINE_TEST_DATABASE_URL=… pytest -q` | **239 passed** | 42.5 s |
 | Windows 11, `cmd.exe` | `pytest -q` | **155 passed** | 41.35 s — that run predates `tests/test_limits.py` and the PostgreSQL work |
 
 The 14 skips on SQLite are the tests that only make sense on a real server or a droppable constraint:
@@ -131,8 +131,8 @@ Everything in this section was executed in this environment. PostgreSQL 16.2 cam
 
 | Claim | How it was verified | Output |
 |---|---|---|
-| The whole suite runs on PostgreSQL | `LEDGERLINE_TEST_DATABASE_URL=postgresql://… pytest -q`, each test in its own schema | `215 passed in 38.90s` |
-| The suite still runs on SQLite | `pytest -q` | `201 passed, 14 skipped` |
+| The whole suite runs on PostgreSQL | `LEDGERLINE_TEST_DATABASE_URL=postgresql://… pytest -q`, each test in its own schema | `239 passed in 42.5s` |
+| The suite still runs on SQLite | `pytest -q` | `224 passed, 15 skipped` |
 | Concurrency guarantees hold on Postgres | the same `test_concurrency.py` (20 racing withdrawals, 20 duplicate keys, 40 opposite transfers) against a live uvicorn on the PG backend | all 6 pass |
 | Append-only is enforced by triggers, not luck | `test_integrity_tamper.py` drops the trigger, rewrites history, and requires the verifier to notice — on both engines | 15 pass on PG, 14 pass + 1 skip on SQLite |
 | The API role cannot rewrite the ledger | `test_db_roles.py` applies the real deployment SQL to a throwaway database | `13 passed` |
@@ -149,7 +149,7 @@ cd backend
 pip install -r requirements-postgres.txt        # pgserver bundles PostgreSQL 16
 python -c "import pgserver,pathlib,time; s=pgserver.get_server(pathlib.Path('/tmp/pg')); print(s.get_uri()); time.sleep(3600)" &
 export LEDGERLINE_TEST_DATABASE_URL="$(cat /tmp/pg_uri)"   # the URI printed above
-pytest -q                                       # 215 passed
+pytest -q                                       # 239 passed
 ```
 
 ## 7. The API running on PostgreSQL, attacked end to end
@@ -178,11 +178,81 @@ python scripts/redteam.py --base-url http://127.0.0.1:8200
     27/27 checks passed
 ```
 
+**Behind an edge filter, two of those checks cannot be observed.** On the Render deployment the
+injection pair reported HTTP **403** — but a prod-mode instance of this same code answers **201** and **404**
+for those exact payloads (verified locally, see §8). The requests never reached the API: something in front
+of Render refused them. The script now distinguishes the two cases by checking for this API's JSON error
+envelope, and prints `[EDGE]` with "blocked by an intermediary" instead of blaming the application. So a
+deployed run can legitimately read `25/27 checks passed (2 blocked by an intermediary)`, and the two blocked
+lines are evidence for neither side — the local run is what proves the parameterisation. Recorded as G37.
+
 That run is also how defect G28 was found: the seed script ignored the database URL and wrote to a
 local SQLite file, so the API started empty. The fix and its regression test are in
 `tests/test_bootstrap.py::TestSeedScriptUsesTheConfiguredBackend`.
 
-## 8. What was *not* verified
+## 8. The deploy path: release step, first admin, prod boot
+
+Run end-to-end against a **fresh, empty** PostgreSQL database (`deploycheck`), in `LEDGERLINE_ENV=prod`:
+
+```
+python -m scripts.migrate                      # release hook equivalent
+  [migrate] target: postgres
+  [migrate] schema absent — applying prisma/migrations
+  [migrate] done — schema version 2              exit 0
+
+python -m scripts.migrate                      # run again, same deploy or a retry
+  [migrate] schema already present (version 2); nothing to do.   exit 0
+
+python -m scripts.migrate                      # prod, no LEDGERLINE_DATABASE_URL
+  [migrate] LEDGERLINE_DATABASE_URL is not set... refusing to create a
+  throwaway SQLite file.                         exit 1  (fails the deploy)
+
+python -m scripts.bootstrap_admin --email ops@deploy.test --print-token
+  Created admin ops@deploy.test (...) on postgres
+
+uvicorn ledgerline.main:app --port 8300        # prod mode, DB created only by migrate
+  GET /api/health -> {"backend":"postgres", "checks":{"database":{"ok":true},
+                     "schema":{"version":"2"}}}
+  GET /api/ready  -> 200
+  POST /api/auth/login (bootstrapped admin) -> 200
+  login throttle: attempt #51 -> 429 with Retry-After: 60
+```
+
+After which the database held 10 tables, `schema_meta.version = 2`, and both chain heads at `0`.
+
+And the container's own entrypoint (`scripts/start.sh`, the Render path), run against a second fresh
+database and a port that is *not* 8000 — the way a PaaS assigns one:
+
+```
+PORT=8301 sh backend/scripts/start.sh           # env=prod, empty database
+  [migrate] target: postgres
+  [migrate] schema absent — applying prisma/migrations
+  [migrate] done — schema version 2
+  INFO: Uvicorn running on http://0.0.0.0:8301
+  GET /api/health -> 200 (backend=postgres, schema.version=2)
+  GET /api/ready  -> 200 (ready=true, schema_version="2")
+
+PORT=8302 RENDER_EXTERNAL_HOSTNAME=balancevault.onrender.com sh backend/scripts/start.sh
+  [migrate] schema already present (version 2); nothing to do.   # idempotent second boot
+  INFO: Uvicorn running on http://0.0.0.0:8302
+  Host: balancevault.onrender.com  GET /api/health -> 200
+  Host: evil.example.com          GET /api/health -> 400 Invalid host header
+  X-Forwarded-For: 203.0.113.9    GET /api/ready  -> 200, logged as client 203.0.113.9
+```
+
+The last line is the one that matters for the login throttle: the platform-provided hostname turns on
+the allowlist, and the allowlist is what makes the per-IP counter read the real client address instead of
+the proxy's. `tests/test_deploy_config.py` (9 tests) pins the parts that can be checked without a
+container: the entrypoint migrates before serving, it reads `$PORT` with 8000 as the fallback, the image
+ships `prisma/migrations`, the blueprint health check targets `/api/ready`, and no secret is written into
+`render.yaml`.
+
+**Not verified:** the container image itself. There is no Docker daemon in this environment, so
+`COPY prisma/ ./prisma/` is a reviewed line, not a built one; the release command was verified by
+running the same module directly against a real server. The `docker` job in CI builds the image on
+every push.
+
+## 9. What was *not* verified
 
 Stated plainly, because the README does not claim it:
 
@@ -190,7 +260,7 @@ Stated plainly, because the README does not claim it:
 |---|---|---|
 | Running the Docker **container** | the development machine has no Docker daemon | the *image build* is verified by CI (`docker build -t ledgerline:ci .`, green) |
 | Prisma **CLI** (`prisma validate`, `migrate deploy`) | the engine binaries cannot be downloaded in this environment | the migration SQL was applied to real PostgreSQL 16.2 in tests, and `test_schema_parity.py` guards drift; the CLI step is documented for CI |
-| The `deploy/docker-compose.yml` stack as a whole | no Docker daemon here | each part was run individually: migration SQL on PG 16.2, role files with 13 tests, API against that server with 215 tests. The YAML is syntax-checked only |
+| The `deploy/docker-compose.yml` stack as a whole | no Docker daemon here | each part was run individually: migration SQL on PG 16.2, role files with 13 tests, API against that server with 239 tests. The YAML is syntax-checked only |
 | Multi-node / horizontal scaling | one writer at a time on both engines | listed as a known limitation, not a feature |
 | Chargeback / reversal workflow | out of the brief's scope | still listed as an open gap in `THREATS.md` (R5 keeps only that half) |
 | Demo video | could not record one in this environment | listed as the one missing deliverable |

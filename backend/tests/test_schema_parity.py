@@ -131,6 +131,16 @@ class TestEnginesAgree:
             for forbidden in ("real", "double precision", "float"):
                 assert f" {forbidden} " not in lowered, forbidden
 
+    def test_both_engines_declare_the_same_schema_version(self):
+        """/api/health reports schema.version, so a deployment check is only useful
+        if the two engines stamp the same logical revision."""
+        import re
+
+        postgres = re.search(r"schema_meta \(key, value\) VALUES \('version', '(\d+)'\)", MIGRATION.read_text())
+        sqlite = re.search(r"schema_meta \(key, value\) VALUES \('version', '(\d+)'\)", SQLITE_SCHEMA.read_text())
+        assert postgres and sqlite, "both schemas must seed schema_meta.version"
+        assert postgres.group(1) == sqlite.group(1), (postgres.group(1), sqlite.group(1))
+
     def test_both_engines_seed_a_chain_head(self):
         for text in (MIGRATION.read_text(), SQLITE_SCHEMA.read_text()):
             assert "chain_state" in text

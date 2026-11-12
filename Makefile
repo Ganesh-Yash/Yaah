@@ -3,13 +3,15 @@
 PY ?= ../.venv/bin/python
 BASE_URL ?= http://localhost:8000
 
-.PHONY: help install seed dev test redteam build docker clean
+.PHONY: help install seed migrate bootstrap dev test redteam build docker clean
 
 help:
 	@echo "install   create .venv and install backend + frontend dependencies"
 	@echo "seed      create the database and demo users"
+	@echo "migrate   apply the schema (release step; honours LEDGERLINE_DATABASE_URL)"
+	@echo "bootstrap create the first ADMIN non-interactively (EMAIL=you@example.com)"
 	@echo "dev       run the API on :8000 (serves the built SPA if frontend/dist exists)"
-	@echo "test      run the backend test suite (153 tests)"
+	@echo "test      run the backend test suite"
 	@echo "redteam   attack a running instance ($(BASE_URL))"
 	@echo "build     build the frontend into frontend/dist"
 	@echo "docker    build and start the compose stack"
@@ -23,6 +25,16 @@ install:
 
 seed:
 	cd backend && ../.venv/bin/python scripts/seed.py --demo
+
+# The same command a platform runs as its release hook. Idempotent: on an
+# already-migrated database it reports the version and changes nothing.
+migrate:
+	cd backend && ../.venv/bin/python -m scripts.migrate
+
+# First admin without the API, e.g. make bootstrap EMAIL=you@example.com
+bootstrap:
+	@test -n "$(EMAIL)" || (echo "usage: make bootstrap EMAIL=you@example.com" && exit 2)
+	cd backend && ../.venv/bin/python -m scripts.bootstrap_admin --email "$(EMAIL)" --print-token
 
 dev:
 	cd backend && LEDGERLINE_STATIC_DIR=$$(pwd)/../frontend/dist \

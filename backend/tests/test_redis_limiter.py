@@ -122,4 +122,4 @@ def test_health_reports_a_disabled_redis_honestly(client):
     body = client.get("/api/health").json()
     assert body["checks"]["redis"]["state"] == "disabled"
     assert body["checks"]["redis"]["ok"] is True
-    assert body["checks"]["schema"]["version"] in {"1", "2"}
+    assert body["checks"]["schema"]["version"] == "2"

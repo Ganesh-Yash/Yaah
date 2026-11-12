@@ -9,6 +9,8 @@ that it survives restarts and is shared between processes.
 
 from __future__ import annotations
 
+import sys
+
 import threading
 import time
 from collections import deque
@@ -131,14 +133,30 @@ class RedisSlidingWindowLimiter:
 
 
 def make_redis_client(settings: Any) -> Any:
-    """Return a Redis client, or None when no Redis URL is configured."""
+    """Return a Redis client, or None when there is no usable Redis URL.
+
+    Two ways to get None: no URL configured (a supported mode — in-process
+    counters), and a URL that does not parse. The second case used to raise
+    during ``create_app``, i.e. a typo in an *optional* dependency killed a
+    process whose rate limiter is documented to fail open (decision D13). A
+    misconfigured cache should degrade the deployment, not take the bank down,
+    so it is reported loudly and treated as "not configured".
+    """
     url = getattr(settings, "redis_url", None)
     if not url:
         return None
     import redis
 
-    client = redis.Redis.from_url(url, socket_timeout=0.25, socket_connect_timeout=0.25)
-    return client
+    try:
+        return redis.Redis.from_url(url, socket_timeout=0.25, socket_connect_timeout=0.25)
+    except ValueError as exc:
+        print(
+            "[ledgerline] LEDGERLINE_REDIS_URL is not a valid redis:// or rediss:// URL "
+            f"({exc}). Rate limiting falls back to in-process counters and will not be "
+            "shared across instances.",
+            file=sys.stderr,
+        )
+        return None
 
 
 def make_limiter(client: Any, *, limit: int, window_seconds: float, prefix: str) -> Any:

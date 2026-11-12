@@ -179,3 +179,87 @@ def test_limit_refusal_is_not_cached_as_an_idempotent_success(limited):
     retried = api.withdraw(customer, account["id"], "40.00", key=key)
     assert retried.status_code == 201, retried.text
     assert api.balance(customer, account["id"]) == "400.00"
+
+
+class TestRateLimitResponsesAreActionable:
+    """A 429 must say when to come back.
+
+    RFC 6585 defines Retry-After for 429. Without it a client can only guess, and
+    guessing usually means retrying immediately — which is how a throttle turns
+    into a retry storm.
+    """
+
+    def test_money_throttle_sets_retry_after(self, api, alice, admin):
+        account = api.open_account(admin, "alice@example.com")
+        api.deposit(alice, account["id"], "10.00")
+        limited = None
+        for _ in range(api.settings.money_writes_per_minute + 2):
+            response = api.client.post(
+                f"/api/accounts/{account['id']}/deposit",
+                json={"amount": "0.01"},
+                headers={**alice, "Idempotency-Key": str(uuid.uuid4())},
+            )
+            if response.status_code == 429:
+                limited = response
+                break
+        assert limited is not None, "the money throttle never triggered"
+        assert limited.json()["error"]["code"] == "RATE_LIMITED"
+        assert limited.headers.get("Retry-After") == "60"
+
+    def test_login_throttle_sets_retry_after(self, api):
+        response = None
+        for _ in range(120):
+            response = api.client.post(
+                "/api/auth/login",
+                json={"email": "spray@example.com", "password": "wrong-password-1"},
+            )
+            if response.status_code == 429:
+                break
+        assert response is not None and response.status_code == 429, "the login throttle never triggered"
+        assert response.headers.get("Retry-After") == "60"
+
+class TestAMisconfiguredCacheDoesNotTakeTheBankDown:
+    """Redis is optional (decision D13: the limiter fails open).
+
+    The first real Render deploy died with `ValueError: Redis URL must specify one
+    of the following schemes` — a URL pasted with its surrounding quotes — raised
+    from inside `create_app`. An optional cache being wrong must degrade the
+    deployment, never stop it.
+    """
+
+    def test_quotes_around_the_url_are_stripped(self, monkeypatch):
+        """A dashboard paste arrives with quotes more often than without."""
+        from ledgerline.config import Settings
+
+        monkeypatch.setenv("LEDGERLINE_REDIS_URL", '"rediss://default:pw@example.upstash.io:6379"')
+        monkeypatch.setenv("LEDGERLINE_DATABASE_URL", '  "postgresql://u:p@h/db?sslmode=require"  ')
+        settings = Settings.from_env()
+
+        assert settings.redis_url == "rediss://default:pw@example.upstash.io:6379"
+        assert settings.database_url == "postgresql://u:p@h/db?sslmode=require"
+
+    def test_a_malformed_url_disables_the_limiter_instead_of_raising(self):
+        from ledgerline.config import Settings
+        from ledgerline.limiter import make_redis_client
+
+        settings = Settings(env="test", redis_url="steady-albacore-199338.upstash.io:6379")
+        assert make_redis_client(settings) is None
+
+    def test_the_app_still_boots_and_reports_redis_disabled(self, tmp_path):
+        from fastapi.testclient import TestClient
+
+        from ledgerline.config import Settings
+        from ledgerline.main import create_app
+
+        settings = Settings(
+            env="test",
+            database_path=str(tmp_path / "bad-redis.db"),
+            redis_url='"rediss://"',  # parses to an empty host
+        )
+        with TestClient(create_app(settings)) as client:
+            health = client.get("/api/health")
+            assert health.status_code == 200
+            assert health.json()["checks"]["redis"]["state"] == "disabled"
+            # And the bank works: nothing here depends on Redis.
+            assert client.get("/api/ready").status_code == 200
+
