@@ -1,0 +1,8 @@
+# Optional extras for running the suite against a real PostgreSQL server.
+#   pip install -r requirements-postgres.txt
+#   LEDGERLINE_TEST_DATABASE_URL=postgresql://... pytest -q
+#
+# pgserver bundles PostgreSQL 16 binaries for Linux/macOS, so CI and a laptop can
+# run the integration path without Docker. On Windows use a real server (or the
+# compose stack) and point the same environment variable at it.
+pgserver>=0.1.4

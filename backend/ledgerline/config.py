@@ -50,6 +50,11 @@ class Settings:
 
     env: str = "dev"
     database_path: str = "./data/ledgerline.db"
+    # When set (postgresql://...), PostgreSQL is used and the SQLite path is
+    # ignored. Unset means SQLite: tests and the offline demo.
+    database_url: str | None = None
+    # Optional Postgres schema (least-privilege deployments and per-test isolation).
+    database_schema: str | None = None
 
     jwt_secret: str = ""
     jwt_issuer: str = "ledgerline"
@@ -114,6 +119,10 @@ class Settings:
             object.__setattr__(self, "jwt_secret", secret)
 
     @property
+    def uses_postgres(self) -> bool:
+        return bool(self.database_url)
+
+    @property
     def is_dev_secret(self) -> bool:
         return self.jwt_secret.startswith(DEV_JWT_SECRET_PREFIX)
 
@@ -138,6 +147,8 @@ class Settings:
         settings = cls(
             env=os.environ.get("LEDGERLINE_ENV", "dev").strip().lower(),
             database_path=os.environ.get("LEDGERLINE_DATABASE_PATH", "./data/ledgerline.db"),
+            database_url=os.environ.get("LEDGERLINE_DATABASE_URL") or None,
+            database_schema=os.environ.get("LEDGERLINE_DATABASE_SCHEMA") or None,
             jwt_secret=os.environ.get("LEDGERLINE_JWT_SECRET", ""),
             jwt_issuer=os.environ.get("LEDGERLINE_JWT_ISSUER", "ledgerline"),
             jwt_audience=os.environ.get("LEDGERLINE_JWT_AUDIENCE", "ledgerline-api"),

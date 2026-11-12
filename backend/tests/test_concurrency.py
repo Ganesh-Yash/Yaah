@@ -21,7 +21,7 @@ import uvicorn
 
 from conftest import PASSWORD
 from ledgerline.config import Settings
-from ledgerline.db import Database, utcnow_iso
+from ledgerline.db import Database, make_database, utcnow_iso
 from ledgerline.main import create_app
 from ledgerline.security import hash_password
 
@@ -46,7 +46,7 @@ def live(settings: Settings):
         raise RuntimeError("uvicorn did not start")
 
     with httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=60) as client:
-        yield client, Database(settings.database_path, settings.sqlite_busy_timeout_ms)
+        yield client, make_database(settings)
 
     server.should_exit = True
     thread.join(timeout=10)

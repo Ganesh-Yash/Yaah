@@ -34,7 +34,7 @@ from starlette.staticfiles import StaticFiles
 from . import __version__
 from . import ctx as request_ctx
 from .config import Settings
-from .db import Database
+from .db import database_busy_types, make_database
 from .errors import AppError
 from .limiter import SlidingWindowLimiter
 from .routers import accounts, admin, audit_views, auth, meta, transfers
@@ -63,7 +63,7 @@ def _error_payload(code: str, message: str, request_id: str, details: dict[str, 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
-    db = Database(settings.database_path, settings.sqlite_busy_timeout_ms)
+    db = make_database(settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -209,9 +209,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             content=_error_payload(code, message, _request_id(request)),
         )
 
-    @app.exception_handler(sqlite3.OperationalError)
-    async def sqlite_error_handler(request: Request, exc: sqlite3.OperationalError) -> JSONResponse:
-        logger.error("sqlite operational error: %s", exc)
+    async def database_busy_handler(request: Request, exc: Exception) -> JSONResponse:
+        # Same answer for "the writer lock timed out" on either engine: the
+        # client should retry with the same Idempotency-Key, which is safe.
+        logger.error("database busy: %s", exc)
         return JSONResponse(
             status_code=503,
             content=_error_payload(
@@ -221,6 +222,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ),
             headers={"Retry-After": "1"},
         )
+
+    for _exc_type in database_busy_types():
+        app.add_exception_handler(_exc_type, database_busy_handler)
 
     @app.exception_handler(Exception)
     async def unhandled_handler(request: Request, exc: Exception) -> JSONResponse:

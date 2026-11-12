@@ -112,3 +112,68 @@ class Database:
         with self.read() as conn:
             row = conn.execute(sql, params).fetchone()
         return None if row is None else row[0]
+
+
+    def ping(self) -> tuple[bool, str]:
+        try:
+            with self.read() as conn:
+                conn.execute("SELECT 1").fetchone()
+            return True, "ok"
+        except Exception as exc:  # pragma: no cover - only on a broken volume
+            return False, exc.__class__.__name__
+
+    def schema_version(self) -> str | None:
+        try:
+            value = self.scalar("SELECT value FROM schema_meta WHERE key = 'version'")
+        except sqlite3.Error:  # pragma: no cover - pre-migration database
+            return None
+        return None if value is None else str(value)
+
+
+def make_database(settings: object):
+    """Pick the backend from the settings, not from scattered flags.
+
+    ``LEDGERLINE_DATABASE_URL`` present -> PostgreSQL. Absent -> SQLite, which
+    is what the test suite and the offline demo use.
+    """
+    url = getattr(settings, "database_url", None)
+    if url:
+        from .pg import PostgresDatabase
+
+        return PostgresDatabase(
+            str(url),
+            busy_timeout_ms=getattr(settings, "sqlite_busy_timeout_ms", 10_000),
+            schema=getattr(settings, "database_schema", None),
+        )
+    return Database(
+        str(getattr(settings, "database_path")),
+        int(getattr(settings, "sqlite_busy_timeout_ms", 10_000)),
+    )
+
+
+def is_unique_violation(exc: BaseException) -> bool:
+    """True for a UNIQUE/PRIMARY KEY collision on either engine."""
+    if isinstance(exc, sqlite3.IntegrityError):
+        return "UNIQUE" in str(exc).upper()
+    try:  # psycopg is an optional import for SQLite-only checkouts
+        import psycopg
+    except ImportError:  # pragma: no cover
+        return False
+    return isinstance(exc, psycopg.errors.UniqueViolation)
+
+
+def database_busy_types() -> tuple[type[BaseException], ...]:
+    """Exception classes that mean "the write lock did not let us in"."""
+    types: list[type[BaseException]] = [sqlite3.OperationalError]
+    try:
+        import psycopg
+    except ImportError:  # pragma: no cover
+        return tuple(types)
+    types.extend(
+        [
+            psycopg.errors.LockNotAvailable,
+            psycopg.errors.QueryCanceled,
+            psycopg.errors.OperationalError,
+        ]
+    )
+    return tuple(types)

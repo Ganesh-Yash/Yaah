@@ -16,19 +16,13 @@ router = APIRouter(prefix="/api", tags=["meta"])
 @router.get("/health")
 def health(request: Request) -> dict:
     db = request.app.state.db
-    database_ok = True
-    detail = "ok"
-    try:
-        with db.read() as conn:
-            conn.execute("SELECT 1").fetchone()
-    except sqlite3.Error as exc:  # pragma: no cover - only on a broken volume
-        database_ok = False
-        detail = exc.__class__.__name__
+    database_ok, detail = db.ping()
     return {
         "status": "ok" if database_ok else "degraded",
         "service": "ledgerline-api",
         "version": __version__,
         "database": detail,
+        "backend": getattr(db, "backend", "sqlite"),
         "time": utcnow_iso(),
     }
 

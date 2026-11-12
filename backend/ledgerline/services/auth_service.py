@@ -9,7 +9,7 @@ from typing import Any
 
 from .. import audit, ctx as request_ctx, security
 from ..config import Settings
-from ..db import Database, iso_add_seconds, utcnow_iso
+from ..db import is_unique_violation, Database, iso_add_seconds, utcnow_iso
 from ..errors import AppError, conflict, invalid_credentials, rate_limited, unauthenticated
 from ..security import TokenPair
 
@@ -139,7 +139,9 @@ def register(
             )
             audit.record_in(conn, "USER_REGISTERED", subject=email, target_type="user", target_id=user_id)
             row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-    except sqlite3.IntegrityError as exc:
+    except Exception as exc:
+        if not is_unique_violation(exc):
+            raise
         # Registration necessarily reveals whether an address is taken; this is
         # a documented, accepted trade-off (see THREATS.md).
         raise conflict("EMAIL_ALREADY_REGISTERED", "An account with this email already exists.") from exc
