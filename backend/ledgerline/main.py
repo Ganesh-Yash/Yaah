@@ -36,7 +36,7 @@ from . import ctx as request_ctx
 from .config import Settings
 from .db import database_busy_types, make_database
 from .errors import AppError
-from .limiter import SlidingWindowLimiter
+from .limiter import make_limiter, make_redis_client
 from .routers import accounts, admin, audit_views, auth, meta, transfers
 from .seed import bootstrap, seed_demo
 
@@ -89,8 +89,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = settings
     app.state.db = db
-    app.state.money_limiter = SlidingWindowLimiter(settings.money_writes_per_minute, 60)
-    app.state.login_limiter = SlidingWindowLimiter(100, 60)
+    redis_client = make_redis_client(settings)
+    app.state.redis = redis_client
+    app.state.money_limiter = make_limiter(
+        redis_client, limit=settings.money_writes_per_minute, window_seconds=60, prefix="ledgerline:money"
+    )
+    app.state.login_limiter = make_limiter(
+        redis_client, limit=100, window_seconds=60, prefix="ledgerline:login"
+    )
 
     # --- middleware -------------------------------------------------------
 

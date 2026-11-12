@@ -55,6 +55,8 @@ class Settings:
     database_url: str | None = None
     # Optional Postgres schema (least-privilege deployments and per-test isolation).
     database_schema: str | None = None
+    # Shared rate limiting. Unset -> in-process (single worker only).
+    redis_url: str | None = None
 
     jwt_secret: str = ""
     jwt_issuer: str = "ledgerline"
@@ -149,6 +151,7 @@ class Settings:
             database_path=os.environ.get("LEDGERLINE_DATABASE_PATH", "./data/ledgerline.db"),
             database_url=os.environ.get("LEDGERLINE_DATABASE_URL") or None,
             database_schema=os.environ.get("LEDGERLINE_DATABASE_SCHEMA") or None,
+            redis_url=os.environ.get("LEDGERLINE_REDIS_URL") or None,
             jwt_secret=os.environ.get("LEDGERLINE_JWT_SECRET", ""),
             jwt_issuer=os.environ.get("LEDGERLINE_JWT_ISSUER", "ledgerline"),
             jwt_audience=os.environ.get("LEDGERLINE_JWT_AUDIENCE", "ledgerline-api"),
