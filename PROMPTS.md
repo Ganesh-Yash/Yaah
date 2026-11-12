@@ -11,7 +11,7 @@ engineering judgement was mine:
   each one is enforced: code, transaction, or database constraint.
 - Every row in the decision log below is a proposal I did **not** accept; what I did accept is
   listed separately, under "What I kept from it".
-- I found **34 specific defects** in generated code. Each row records how I found it and what I
+- I found **35 specific defects** in generated code. Each row records how I found it and what I
   changed, because "the AI wrote it" is not an excuse a judge would accept.
 - Every claim in the README is traced to a test or a script in this repository, and every gap is
   written down in "Known limitations".
@@ -39,7 +39,7 @@ Two phases:
 | Where the lock is taken and why | decided | proposed middleware-level checks | D7, `tests/test_concurrency.py` |
 | First draft of most modules | reviewed and corrected all of it | wrote it | commit history; defect tables below |
 | Adversarial tests (concurrency, tamper, idempotency) | specified them and demanded them first | wrote the first versions | `tests/test_concurrency.py`, `test_integrity_tamper.py`, `test_idempotency.py` |
-| Finding defects in generated code | found 34 | produced them | the two tables below |
+| Finding defects in generated code | found 35 | produced them | the two tables below |
 | Deciding what **not** to claim in the docs | decided | kept proposing confident prose | `README.md` → "Known limitations" |
 | Database roles, bootstrap, health checks | specified the threat model | implemented | `deploy/postgres/`, `tests/test_db_roles.py` |
 
@@ -169,6 +169,7 @@ implementation. Most of the defects below were found that way.
 | G33 | Where the migration runs on a platform without a release hook | The release step was wired only to Fly's `release_command`. Render offers a pre-deploy command only on some plans, so a deploy there would have started the API against a database with no schema — the app would answer `/api/health` with 200 and 500 on every real route | Walking the Render deploy path start to finish instead of assuming the Fly design generalised | The entrypoint now runs `python -m scripts.migrate` before uvicorn under `set -eu` (a failed migration aborts the boot), with `LEDGERLINE_SKIP_STARTUP_MIGRATION=1` for platforms that run it as a separate pre-traffic step. Verified by booting the entrypoint on an arbitrary port against an empty database |
 | G34 | `make_redis_client()` on a malformed URL | `redis.Redis.from_url` raises `ValueError`, and it is called from `create_app` at import time — so one mistyped, entirely optional cache URL killed the process. That contradicts D13, where the limiter is documented to fail **open** because a cache outage must not stop a bank | The first real deploy, on Render: `ValueError: Redis URL must specify one of the following schemes` with a full traceback, because the dashboard value had been pasted with its quotes | Surrounding quotes and whitespace are stripped from both connection URLs when they load, and a URL that still will not parse is reported once on stderr and treated as "Redis not configured" — the app boots, `/api/health` says `redis.state: disabled`, and money movement is unaffected. Three tests |
 | G35 | `branch` in `render.yaml` | I wrote `branch: main` into the blueprint while the work lived on an unmerged branch. Render obeys that key over the dashboard's branch picker, so the service was created from the correct branch, read the correct configuration from it, and then deployed `main` — a build with no migration step, no `$PORT` support and none of the fixes the blueprint configured. Every setting looked right and the image was the wrong code | The deploy log: correct env vars, correct health-check config, and a traceback from `limiter.py:140` — a line that no longer exists on the branch | `branch:` now names the branch actually being deployed, the comment says that this key wins, docs/DEPLOYMENT.md explains the symptom, and `tests/test_deploy_config.py` fails if the key goes missing again |
+| G36 | The documented path to a first admin on a free host | Both docs/DEPLOYMENT.md and `render.yaml` told the operator to set `LEDGERLINE_DEMO_SEED=1` in production and then change the demo password. `seed_demo()` refuses to run when `LEDGERLINE_ENV=prod` — correctly, since the demo password is in this repository — so the documented instruction produced a crash-loop, not an admin | A real deploy: `RuntimeError: refusing to create demo accounts when LEDGERLINE_ENV=production`, exit status 3, service down | The advice is gone. Docs now state that the guard exists and why, and give two routes that actually work: `scripts/bootstrap_admin.py` locally, or `.github/workflows/create-admin.yml` — a manual-dispatch job that takes the password from a repository secret so it never reaches a public run log |
 
 > The numbering skips **G21**: that defect belongs to a change that is not in this commit
 > history. I kept the numbers stable instead of renumbering, because other documents refer to them.
@@ -221,7 +222,7 @@ that decides whether those characters are correct:
 |---|---|
 | The invariants, and the enforcement point chosen for each | `THREATS.md` §2; every invariant has a test that fails if it is removed |
 | Every decision in the log above is a rejection of a proposal — the accepted ones are listed separately | the "what the AI proposed" column |
-| 34 defects found by reading, reasoning and running — not by trusting | the two defect tables, each with "how it surfaced" |
+| 35 defects found by reading, reasoning and running — not by trusting | the two defect tables, each with "how it surfaced" |
 | The adversarial cases that make the guarantees meaningful | `test_concurrency.py`, `test_integrity_tamper.py`, `test_idempotency.py`, `scripts/redteam.py` |
 | The decision to document gaps instead of hiding them | `README.md` → "Known limitations" (11 items), `docs/VERIFICATION.md` §9 |
 
