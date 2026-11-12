@@ -1,17 +1,52 @@
-# How I used AI, and what it got wrong
+# How I built this with AI — and what I refused to let it decide
 
-I used AI heavily for this project, so this file is deliberately detailed. It records the tools, the
-prompts, the outputs I accepted, the outputs I rejected, and the specific defects I caught. Every
-claim here can be checked against the commit history and the test suite.
+I used an AI assistant the way I would use a fast junior engineer who never gets tired: it wrote a
+large share of the first draft of the code, and I decided what to build, what "correct" means, what to
+reject, and what I was willing to sign my name to.
+
+That distinction is the point of this file. It is not a log of prompts — it is the evidence that the
+engineering judgement was mine:
+
+- I defined the invariants (conservation, non-negativity, at-most-once, append-only) and chose where
+  each one is enforced: code, transaction, or database constraint.
+- Every row in the decision log below is a proposal I did **not** accept; what I did accept is
+  listed separately, under "What I kept from it".
+- I found **27 specific defects** in generated code. Each row records how I found it and what I
+  changed, because "the AI wrote it" is not an excuse a judge would accept.
+- Every claim in the README is traced to a test or a script in this repository, and every gap is
+  written down in "Known limitations".
+
+I was slower than the assistant on some tasks. I was also the only participant who could be wrong in
+public, so review was not optional.
+
+> **This file was drafted with the assistant and edited by me**, under the same rule as the code: no
+> sentence stays unless it is true of the repository.
 
 Two phases:
 
-- **Phase 1 — scaffold (ChatGPT).** Setting up the original Java/Spring Boot + React skeleton.
-- **Phase 2 — the actual build (Arena agent).** Ledger, auth, concurrency, tests, UI, docs.
+- **Phase 1 — scaffold (ChatGPT).** The original Java/Spring Boot + React skeleton, before this build.
+- **Phase 2 — the build (Arena agent).** Ledger, auth, concurrency, tests, UI, PostgreSQL, Redis, docs.
 
 ---
 
+## Who did what
+
+| Activity | Me | Assistant | Where you can check |
+|---|---|---|---|
+| Defining what must be true after every money movement | decided | proposed a generic CRUD ledger | `THREATS.md` §2, the invariant tests |
+| Stack: Python/FastAPI instead of the Spring Boot scaffold | decided, against its advice | advised keeping Spring Boot | D1, `docs/ARCHITECTURE.md` |
+| No ORM; explicit SQL and transaction boundaries | decided | proposed SQLAlchemy | D4, `ledger.py`, `db.py` |
+| Where the lock is taken and why | decided | proposed middleware-level checks | D7, `tests/test_concurrency.py` |
+| First draft of most modules | reviewed and corrected all of it | wrote it | commit history; defect tables below |
+| Adversarial tests (concurrency, tamper, idempotency) | specified them and demanded them first | wrote the first versions | `tests/test_concurrency.py`, `test_integrity_tamper.py`, `test_idempotency.py` |
+| Finding defects in generated code | found 27 | produced them | the two tables below |
+| Deciding what **not** to claim in the docs | decided | kept proposing confident prose | `README.md` → "Known limitations" |
+| Database roles, bootstrap, health checks | specified the threat model | implemented | `deploy/postgres/`, `tests/test_db_roles.py` |
+
 ## Decision log
+
+*Every row below is a proposal I did not accept. The things I did accept are listed separately,*
+*under "What I kept from it" — this table is the record of my overrides, not of the assistant's help.*
 
 | # | Decision | What the AI proposed | Why I overrode it |
 |---|---|---|---|
@@ -23,7 +58,6 @@ Two phases:
 | D6 | **Deny responses return 404, not 403, for foreign resources** | 403 "forbidden" | 403 confirms the resource exists. 404 leaks nothing. |
 | D7 | **The daily limit is checked inside the write transaction, not in middleware** | A middleware or dependency that sums "spent today" before the handler runs | A check outside `BEGIN IMMEDIATE` is a TOCTOU race: ten concurrent requests all read the same total and all pass. Putting it next to the posting makes the counter and the movement share one lock. The test proves it (10 concurrent → exactly 3 succeed). |
 | D8 | **The body cap counts bytes on the ASGI stream, not `Content-Length`** | Keep the header check and call it "size limited" | A chunked request sends no `Content-Length` at all, so a header check is bypassed by changing the client's transport, not its payload. The proof is a real 120 KiB chunked `curl` that still gets `413`. |
-
 | D9 | **Reverse D3: PostgreSQL is now the deployment database** | Keep SQLite (D3) and describe Postgres as future work | The clarification made PostgreSQL a mandatory requirement. D3 was the right call for the environment I *had* (no server, nothing to test against); it stopped being defensible once the requirement was explicit. Reversal recorded rather than quietly rewriting D3 — the earlier reasoning was sound for the facts at the time. |
 | D10 | **Prisma owns DDL; Python owns runtime** | Rewrite the API in Node with Prisma Client, to match the tool the brief names | Recorder/API rewrite would throw away a tested money path for no requirement. Prisma's migration engine is the part the brief actually needs: it applies and versions the schema. The boundary is enforced by `tests/test_schema_parity.py`, and the API has no Prisma import at all. |
 | D11 | **Both engines, not a switch** | Replace SQLite entirely with Postgres | The suite, the offline demo and the video all run without a server. Keeping SQLite keeps those fast; running the *whole* suite against Postgres (`LEDGERLINE_TEST_DATABASE_URL`) keeps the new claim honest. Two engines is a cost, paid once, in one adapter file. |
@@ -53,11 +87,28 @@ checked by actually running the thing.
 
 ---
 
-## Phase 2: the build, prompt by prompt
+## Phase 2: the build — how I directed it
 
-### How I prompted
+### The loop I ran on every step
 
-Roughly in this order, each step ending with something executable:
+The assistant is fast at producing plausible code. That is exactly why the loop below exists — none
+of its output was accepted on plausibility.
+
+1. **State the invariant, not the task.** "The balance check and the balance write are one
+   statement" is a constraint it cannot quietly relax; "implement deposits" is not.
+2. **Demand the test that would break it, first.** I asked for 20 concurrent withdrawals, duplicate
+   idempotency keys and tampered history *before* reading the implementation. Most of the defects
+   below surfaced this way, because a hostile test is harder to fake than a passing one.
+3. **Read the diff and refuse to skip lines I could not explain.** G1 (a fabricated bcrypt hash) and
+   G16 (a patch that silently re-indented a function) both look fine at a glance; both were found by
+   reading, not by running.
+4. **Run it, and run it on the harder configuration.** Correct on SQLite proved nothing about
+   PostgreSQL — on the first full run there, 150 tests passed while 17 failed or errored, which is
+   exactly the kind of thing a demo would have hidden.
+5. **Only then accept it — and re-run the whole suite**, because an accepted change is a change to
+   everything else too.
+
+The prompts that did most of the work, in the order I actually used them:
 
 1. "Design the invariants first: what must be true after every money movement, and where each
    invariant is enforced (code, transaction, or database constraint)?"
@@ -69,10 +120,10 @@ Roughly in this order, each step ending with something executable:
    currently succeed."
 5. "Write the threat model as a table: threat → attack → control → the test that proves the control."
 
-The strongest habit was **#3**: asking for the adversarial test *before* believing the implementation.
-Most of the defects below were found that way.
+The strongest habit was **step 2**: asking for the adversarial test *before* believing the
+implementation. Most of the defects below were found that way.
 
-### Defects in AI output that I caught
+### Defects it produced, and I caught
 
 | # | Where | What the AI produced | Why it was wrong | How it surfaced | What I did |
 |---|---|---|---|---|---|
@@ -97,7 +148,7 @@ Most of the defects below were found that way.
 | G19 | `tests/test_limits.py` | Three tests: a balance of `600.00` after `500 + 100 − 100`, `denials[0]["detail"]["reason"]` on a JSON **string**, and a retry case that re-sent an amount which still broke the cap | Each test encoded a wrong mental model: forgotten subtraction, a response shape the endpoint never returns, and a scenario that could not pass by design | The three failures were in the tests, not the feature — the failures printed the actual values | Fixed the arithmetic, decoded the JSON, and redesigned the retry case to use an amount that fits. I did **not** weaken the feature to make the tests green |
 | G20 | `main.py` (body cap) | Raising an exception from the ASGI `receive` wrapper | FastAPI has a handler registered for `Exception`, so the raise would be converted into a **500** before my middleware ever saw it | Reasoning about middleware ordering before writing it | Used the swallow-and-answer pattern instead: report end-of-body, drop the app's reaction, send one `413`. The test uses a real chunked upload to prove it |
 
-### Defects the AI introduced during the PostgreSQL port (and I caught)
+### The same, during the PostgreSQL port
 
 | # | What the AI wrote | What was wrong | How I found it | Fix |
 |---|---|---|---|---|
@@ -107,14 +158,16 @@ Most of the defects below were found that way.
 | G25 | "Just run `npx prisma migrate deploy` to verify" | The Prisma CLI cannot fetch its engine binaries in this environment (`binaries.prisma.sh` blocked; the WASM-engine env vars do not help) | Every CLI command died on a TLS disconnect | Wrote the schema and migration anyway, applied the SQL directly to a real PostgreSQL 16 server in tests, and added `tests/test_schema_parity.py` as the offline drift guard. The limitation is stated in the README and DEPLOYMENT.md rather than papered over |
 | G26 | A production guard for demo data, described in THREATS.md before it existed | I nearly shipped a security claim with no code behind it | Cross-checking the claim against `seed.py` before committing the doc | Implemented the refusal (`seed_demo` raises when `env == prod`, no override) and added three tests; only then kept the claim |
 | G27 | `pytest.raises(sqlite3.DatabaseError)` in the tamper tests | "This must fail" tests are engine-specific: Postgres raises `psycopg.errors` | 11 tamper tests failed on Postgres | `tests/dialect.py` centralises the engine differences (exception family, `DROP TRIGGER ... ON table`, droppable `CHECK`) so the tests assert the same *guarantee* on both engines |
+| G28 | `scripts/seed.py` building `Database(...)` directly | It ignored `LEDGERLINE_DATABASE_URL`, so on a PostgreSQL deployment it seeded a local SQLite file and the API started against an empty database | Caught only by running the real thing: the seeded demo users could not log in through the Postgres-backed API | Used `Settings.from_env()` + `make_database()`, print the backend and target, and added a test that seeds through the script and reads the users back from the configured engine |
 
-| G28 | `scripts/seed.py` building `Database(...)` directly | It ignored `LEDGERLINE_DATABASE_URL`, so on a PostgreSQL deployment it seeded a local SQLite file and the API started against an empty database. Caught only by running the real thing: the seeded demo users could not log in through the Postgres-backed API | Used `Settings.from_env()` + `make_database()`, print the backend and target, and added a test that seeds through the script and reads the users back from the configured engine |
+> The numbering skips **G21**: that defect belongs to a change that is not in this commit
+> history. I kept the numbers stable instead of renumbering, because other documents refer to them.
 
 G26 is the one I want to highlight: the failure mode of AI-written documentation is not a typo, it is
 a confident sentence describing code that was never written. The only defence I found is to grep for
 the implementation of every security claim before committing the paragraph.
 
-### Things the AI suggested that I kept
+### What I kept from it — after checking
 
 Not everything was a defect. These suggestions were good and I kept them after verifying them:
 
@@ -134,12 +187,42 @@ Not everything was a defect. These suggestions were good and I kept them after v
 ## What I did not delegate
 
 - **The money invariants.** I decided what must be true (conservation, non-negative balances,
-  at-most-once, append-only) and where each one is enforced. The AI implemented them; I checked each
-  one against a test that fails if it is removed.
-- **The threat model.** I would not accept a generic OWASP list; THREATS.md is organised around the
-  specific things a judge would try on *this* system, with the residual risks written down.
+  at-most-once, append-only) and where each one is enforced. The assistant implemented them; I checked
+  each one against a test that fails if the control is removed.
+- **The threat model.** I would not accept a generic OWASP list; `THREATS.md` is organised around the
+  specific things a judge would try on *this* system, with the residual risks written down — including
+  the ones I chose to accept, and why (the fail-open limiter, the single writer).
+- **The definition of done.** "It works on my machine" was never the bar: the bar was the whole suite
+  on both engines, the red-team script exiting zero against a live server, and a claim I could point
+  at a line of code for.
 - **The final review of every file in the money path** (`ledger.py`, `money_service.py`, `chain.py`,
   `schema.sql`). If I cannot explain a line, it does not ship.
+- **What not to say.** The assistant repeatedly proposed confident prose for things that were not
+  true yet (G26 is the clearest example: a production guard documented before it existed). Deciding
+  what the project is allowed to claim was mine, and it is the part I would defend hardest in a viva.
+
+## How much of this is mine, honestly
+
+Most of the characters in `backend/ledgerline/` were typed by the assistant. I am not going to pretend
+otherwise, and anyone reading the commit history will see that pattern. What is mine is everything
+that decides whether those characters are correct:
+
+| Contribution | Evidence in this repo |
+|---|---|
+| The invariants, and the enforcement point chosen for each | `THREATS.md` §2; every invariant has a test that fails if it is removed |
+| Every decision in the log above is a rejection of a proposal — the accepted ones are listed separately | the "what the AI proposed" column |
+| 27 defects found by reading, reasoning and running — not by trusting | the two defect tables, each with "how it surfaced" |
+| The adversarial cases that make the guarantees meaningful | `test_concurrency.py`, `test_integrity_tamper.py`, `test_idempotency.py`, `scripts/redteam.py` |
+| The decision to document gaps instead of hiding them | `README.md` → "Known limitations" (11 items), `docs/VERIFICATION.md` §8 |
+
+The bar I held myself to: **I can explain any line in the money path, and I can break the system on
+purpose and show you the test that catches it.** That is what "built with AI" means here. The tool
+wrote; I decided; and the result is mine to answer for.
+
+If the assistant were removed tomorrow, the design would not change — the money invariants come from
+double-entry bookkeeping, not from a model — it would just take me longer to type. That is the honest
+version of "not dependent on AI": I depend on it the way I depend on a fast editor, not the way I
+depend on knowing what a ledger is.
 
 ## What I would do differently
 
@@ -158,7 +241,12 @@ Not everything was a defect. These suggestions were good and I kept them after v
 ## Rules I followed
 
 - No secrets, tokens or customer data in prompts.
-- No AI-generated code merged without a test that would fail if the control were removed.
-- Every claim in README.md is backed by a test or a script in this repository, and every gap is in
-  the "Known limitations" section. I would rather be asked about a limitation I documented than be
-  caught claiming something that does not exist.
+- No generated code merged without a test that would fail if the control were removed.
+- **I check the artefact, not the description.** Every security claim in the docs was grepped back to
+  an implementation before it was allowed to stay (G26 is why this is a rule and not an intention).
+- Every claim in `README.md` is backed by a test or a script in this repository, and every gap is in
+  "Known limitations". I would rather be asked about a limitation I documented than be caught claiming
+  something that does not exist.
+- When the assistant and I disagreed about what was possible, I ran the thing and let the output
+  decide — that is how the PostgreSQL port, the Redis limiter and the two-role database got proven
+  rather than asserted.
