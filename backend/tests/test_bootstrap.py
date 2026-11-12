@@ -148,3 +148,22 @@ class TestDemoSeedIsRefusedInProduction:
             seed_demo(db, prod)
         with db.read() as conn:
             assert conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
+
+
+class TestSeedScriptUsesTheConfiguredBackend:
+    """G28: the script used to build a SQLite Database directly, so on a
+    PostgreSQL deployment it seeded a local file and the API came up empty."""
+
+    def test_seed_writes_to_the_configured_database(self, db, settings, monkeypatch):
+        import sys
+
+        from scripts import seed as seed_script
+
+        monkeypatch.setattr(Settings, "from_env", classmethod(lambda cls: settings))
+        monkeypatch.setattr(sys, "argv", ["seed.py", "--demo"])
+
+        assert seed_script.main() == 0
+
+        with db.read() as conn:
+            users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        assert users >= 4, "demo users did not land in the configured database"

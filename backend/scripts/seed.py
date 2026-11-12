@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ledgerline.config import Settings  # noqa: E402
-from ledgerline.db import Database  # noqa: E402
+from ledgerline.db import make_database  # noqa: E402
 from ledgerline.seed import DEMO_PASSWORD, bootstrap, seed_demo  # noqa: E402
 
 
@@ -27,8 +27,8 @@ def main() -> int:
     parser.add_argument("--demo", action="store_true", help="create demo users and accounts")
     parser.add_argument(
         "--database",
-        default=os.environ.get("LEDGERLINE_DATABASE_PATH", "./data/ledgerline.db"),
-        help="path to the SQLite database file",
+        default=None,
+        help="SQLite file to use (ignored when LEDGERLINE_DATABASE_URL is set)",
     )
     parser.add_argument(
         "--password",
@@ -37,16 +37,23 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    settings = Settings(
-        env="dev",
-        database_path=args.database,
-        jwt_secret="seed-script-" + "0" * 32,  # no tokens are issued here
-        bcrypt_rounds=12,
-    )
-    db = Database(settings.database_path, settings.sqlite_busy_timeout_ms)
+    # Honour the same configuration the application does: this used to construct
+    # a SQLite Database directly, so on a PostgreSQL deployment it silently
+    # seeded a local file and the API came up empty.
+    settings = Settings.from_env()
+    if args.database:
+        import dataclasses
+
+        settings = dataclasses.replace(settings, database_path=args.database)
+
+    db = make_database(settings)
     db.initialize()
     bootstrap(db)
-    print(f"[seed] schema and system accounts ready: {settings.database_path}")
+    target = getattr(db, "backend", "sqlite")
+    print(
+        "[seed] schema and system accounts ready: "
+        f"{target} / {settings.database_url or settings.database_path}"
+    )
 
     if args.demo:
         result = seed_demo(db, settings, args.password)

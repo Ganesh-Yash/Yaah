@@ -108,6 +108,8 @@ Most of the defects below were found that way.
 | G26 | A production guard for demo data, described in THREATS.md before it existed | I nearly shipped a security claim with no code behind it | Cross-checking the claim against `seed.py` before committing the doc | Implemented the refusal (`seed_demo` raises when `env == prod`, no override) and added three tests; only then kept the claim |
 | G27 | `pytest.raises(sqlite3.DatabaseError)` in the tamper tests | "This must fail" tests are engine-specific: Postgres raises `psycopg.errors` | 11 tamper tests failed on Postgres | `tests/dialect.py` centralises the engine differences (exception family, `DROP TRIGGER ... ON table`, droppable `CHECK`) so the tests assert the same *guarantee* on both engines |
 
+| G28 | `scripts/seed.py` building `Database(...)` directly | It ignored `LEDGERLINE_DATABASE_URL`, so on a PostgreSQL deployment it seeded a local SQLite file and the API started against an empty database. Caught only by running the real thing: the seeded demo users could not log in through the Postgres-backed API | Used `Settings.from_env()` + `make_database()`, print the backend and target, and added a test that seeds through the script and reads the users back from the configured engine |
+
 G26 is the one I want to highlight: the failure mode of AI-written documentation is not a typo, it is
 a confident sentence describing code that was never written. The only defence I found is to grep for
 the implementation of every security claim before committing the paragraph.
