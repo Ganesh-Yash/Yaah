@@ -195,4 +195,9 @@ CREATE TABLE IF NOT EXISTS schema_meta (
     value TEXT NOT NULL
 );
 
-INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('version', '1');
+-- The version tracks the logical schema, which both engines share, so it must
+-- match prisma/migrations/*/migration.sql. Upsert rather than IGNORE so an
+-- existing dev database is upgraded on the next initialise instead of
+-- reporting a stale version forever.
+INSERT INTO schema_meta (key, value) VALUES ('version', '2')
+    ON CONFLICT (key) DO UPDATE SET value = excluded.value;

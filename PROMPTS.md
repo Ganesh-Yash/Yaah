@@ -11,7 +11,7 @@ engineering judgement was mine:
   each one is enforced: code, transaction, or database constraint.
 - Every row in the decision log below is a proposal I did **not** accept; what I did accept is
   listed separately, under "What I kept from it".
-- I found **27 specific defects** in generated code. Each row records how I found it and what I
+- I found **30 specific defects** in generated code. Each row records how I found it and what I
   changed, because "the AI wrote it" is not an excuse a judge would accept.
 - Every claim in the README is traced to a test or a script in this repository, and every gap is
   written down in "Known limitations".
@@ -39,7 +39,7 @@ Two phases:
 | Where the lock is taken and why | decided | proposed middleware-level checks | D7, `tests/test_concurrency.py` |
 | First draft of most modules | reviewed and corrected all of it | wrote it | commit history; defect tables below |
 | Adversarial tests (concurrency, tamper, idempotency) | specified them and demanded them first | wrote the first versions | `tests/test_concurrency.py`, `test_integrity_tamper.py`, `test_idempotency.py` |
-| Finding defects in generated code | found 27 | produced them | the two tables below |
+| Finding defects in generated code | found 30 | produced them | the two tables below |
 | Deciding what **not** to claim in the docs | decided | kept proposing confident prose | `README.md` → "Known limitations" |
 | Database roles, bootstrap, health checks | specified the threat model | implemented | `deploy/postgres/`, `tests/test_db_roles.py` |
 
@@ -160,6 +160,10 @@ implementation. Most of the defects below were found that way.
 | G27 | `pytest.raises(sqlite3.DatabaseError)` in the tamper tests | "This must fail" tests are engine-specific: Postgres raises `psycopg.errors` | 11 tamper tests failed on Postgres | `tests/dialect.py` centralises the engine differences (exception family, `DROP TRIGGER ... ON table`, droppable `CHECK`) so the tests assert the same *guarantee* on both engines |
 | G28 | `scripts/seed.py` building `Database(...)` directly | It ignored `LEDGERLINE_DATABASE_URL`, so on a PostgreSQL deployment it seeded a local SQLite file and the API started against an empty database | Caught only by running the real thing: the seeded demo users could not log in through the Postgres-backed API | Used `Settings.from_env()` + `make_database()`, print the backend and target, and added a test that seeds through the script and reads the users back from the configured engine |
 
+| G29 | `rate_limited()` returning a bare `429` | No `Retry-After`, and `AppError` had no way to carry response headers at all — so a throttled client could only guess how long to wait, which usually means retrying immediately | Hit the live limit with 120 bad logins and read the response headers, rather than reading the code | Added a `headers` field to `AppError`, forwarded it from the exception handler, and set `Retry-After: 60` on the money throttle and the login throttle; two tests pin it |
+| G30 | The first version of `scripts/migrate.py` | With no `LEDGERLINE_DATABASE_URL` it fell through to the default SQLite path, so a release step in a container would have "succeeded" by creating a throwaway file that the next deploy discards | Its own test: `test_refuses_when_there_is_no_target` returned 0 instead of 1 | A production release now refuses without an explicit database URL; the test asserts exit 1 and a message that names the variable |
+| G31 | `PostgresDatabase.schema_version()` | It raised `UndefinedTable` on an empty database — exactly the state a release step exists to fix — while the SQLite adapter returned `None` for the same situation | Running `python -m scripts.migrate` against a genuinely empty database, not against the test fixtures | Missing relation now reads as "no version yet" on both engines, and `/api/ready` can answer before the first migration |
+
 > The numbering skips **G21**: that defect belongs to a change that is not in this commit
 > history. I kept the numbers stable instead of renumbering, because other documents refer to them.
 
@@ -211,7 +215,7 @@ that decides whether those characters are correct:
 |---|---|
 | The invariants, and the enforcement point chosen for each | `THREATS.md` §2; every invariant has a test that fails if it is removed |
 | Every decision in the log above is a rejection of a proposal — the accepted ones are listed separately | the "what the AI proposed" column |
-| 27 defects found by reading, reasoning and running — not by trusting | the two defect tables, each with "how it surfaced" |
+| 30 defects found by reading, reasoning and running — not by trusting | the two defect tables, each with "how it surfaced" |
 | The adversarial cases that make the guarantees meaningful | `test_concurrency.py`, `test_integrity_tamper.py`, `test_idempotency.py`, `scripts/redteam.py` |
 | The decision to document gaps instead of hiding them | `README.md` → "Known limitations" (11 items), `docs/VERIFICATION.md` §8 |
 

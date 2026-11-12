@@ -46,6 +46,15 @@ def to_pg_sql(sql: str) -> str:
     return _PLACEHOLDER.sub("%s", sql)
 
 
+def _is_missing_relation(exc: BaseException) -> bool:
+    """True for "that table does not exist yet" (an unmigrated database)."""
+    try:
+        import psycopg
+    except ImportError:  # pragma: no cover
+        return False
+    return isinstance(exc, psycopg.errors.UndefinedTable)
+
+
 class PgRow(dict):
     """A row that behaves like ``sqlite3.Row``: name *and* position access.
 
@@ -178,8 +187,20 @@ class PostgresDatabase:
                 conn.execute(path.read_text(encoding="utf-8"))
 
     def schema_version(self) -> str | None:
-        with self.read() as conn:
-            row = conn.execute("SELECT value FROM schema_meta WHERE key = 'version'").fetchone()
+        """The applied schema version, or None when the database is still empty.
+
+        An empty database is a normal state — it is what a release step is for — so
+        a missing table must read as "no version yet", not as an error. The SQLite
+        adapter has always behaved this way; this keeps the two engines honest with
+        each other, and keeps /api/ready answerable before the first migration.
+        """
+        try:
+            with self.read() as conn:
+                row = conn.execute("SELECT value FROM schema_meta WHERE key = 'version'").fetchone()
+        except Exception as exc:  # noqa: BLE001 - narrow check below
+            if _is_missing_relation(exc):
+                return None
+            raise
         return None if row is None else str(row["value"])
 
     # -- helpers -----------------------------------------------------------
